@@ -1,0 +1,17 @@
+[package]
+name = "rvirc"
+version = "0.1.0"
+edition = "2021"
+description = "Rust + VIM + IRC - terminal IRC client with vim-style commands"
+authors = ["rvIRC"]
+license = "MIT"
+
+[dependencies]
+ratatui = "0.28"
+crossterm = "0.28"
+irc = { version = "1.1", default-features = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+directories = "5"
+futures-util = "0.3"
