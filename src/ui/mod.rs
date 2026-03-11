@@ -92,6 +92,14 @@ pub fn draw(f: &mut Frame, app: &App) {
     if app.whois_popup_visible {
         draw_whois_popup(f, area, app);
     }
+
+    if app.credits_popup_visible {
+        draw_credits_popup(f, area);
+    }
+
+    if app.license_popup_visible {
+        draw_license_popup(f, area, app);
+    }
 }
 
 fn draw_message_area(f: &mut Frame, area: Rect, app: &App) {
@@ -495,6 +503,80 @@ fn draw_server_list_popup(f: &mut Frame, area: Rect, app: &App) {
         })
         .with_offset(offset);
     f.render_stateful_widget(list, list_area, &mut list_state);
+}
+
+const LICENSE_TEXT: &str = include_str!("../../LICENSE");
+
+fn draw_credits_popup(f: &mut Frame, area: Rect) {
+    let popup_width = 52;
+    let popup_height = 8;
+    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
+    let popup_rect = Rect {
+        x,
+        y,
+        width: popup_width,
+        height: popup_height,
+    };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(2), Constraint::Length(1)])
+        .margin(1)
+        .split(popup_rect);
+
+    f.render_widget(Clear, popup_rect);
+    let popup_style = popup_overlay_style();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Credits ")
+        .style(popup_style);
+    f.render_widget(block, popup_rect);
+
+    let text = "Created by Kara Zajac (.leviathan)\n\nhttps://github.com/KaraZajac";
+    let para = Paragraph::new(text)
+        .style(popup_style)
+        .wrap(Wrap { trim: true });
+    f.render_widget(para, chunks[0]);
+
+    let hint = Paragraph::new("Esc / Enter / q to close").style(popup_style.add_modifier(Modifier::DIM));
+    f.render_widget(hint, chunks[1]);
+}
+
+fn draw_license_popup(f: &mut Frame, area: Rect, app: &App) {
+    let popup_width = (area.width * 3 / 4).min(72).max(50);
+    let popup_height = (area.height * 3 / 4).min(28).max(14);
+    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
+    let popup_rect = Rect {
+        x,
+        y,
+        width: popup_width,
+        height: popup_height,
+    };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(2), Constraint::Length(1)])
+        .margin(1)
+        .split(popup_rect);
+
+    f.render_widget(Clear, popup_rect);
+    let popup_style = popup_overlay_style();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" License ")
+        .style(popup_style);
+    f.render_widget(block, popup_rect);
+
+    let scroll = (app.license_popup_scroll_offset as u16, 0);
+    let para = Paragraph::new(LICENSE_TEXT)
+        .style(popup_style)
+        .wrap(Wrap { trim: true })
+        .scroll(scroll);
+    f.render_widget(para, chunks[0]);
+
+    let hint = Paragraph::new("j/k or arrows: scroll | Esc / Enter / q: close")
+        .style(popup_style.add_modifier(Modifier::DIM));
+    f.render_widget(hint, chunks[1]);
 }
 
 fn draw_whois_popup(f: &mut Frame, area: Rect, app: &App) {

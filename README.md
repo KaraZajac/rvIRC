@@ -46,6 +46,9 @@ Type `:` to enter COMMAND mode, then run any of these (case-insensitive):
 | `channel-panel show` / `hide` | Show or hide the channels pane |
 | `user-panel show` / `hide` | Show or hide the users pane |
 | `channels` / `users` | Focus channels or users pane |
+| `version` | Show version (1.0.0) in status bar |
+| `credits` | Show credits popup (author and GitHub link) |
+| `license` | Show license popup (full LICENSE text) |
 
 ## Keybindings
 
@@ -91,6 +94,8 @@ User actions: **Kick** and **Ban** perform the IRC command (current channel). **
 - **:servers** — j/k or arrows to move, **Enter** to connect, **Esc** to close.
 - **:list** — Type to filter; **Enter** to toggle “scroll mode” then j/k + Enter to join; **Esc** to close.
 - **Whois** — **Esc** or **Enter** or **q** to close.
+- **:credits** — **Esc** or **Enter** or **q** to close.
+- **:license** — **j/k** or arrows / Page Up/Down to scroll; **Esc** or **Enter** or **q** to close.
 
 ## Config
 

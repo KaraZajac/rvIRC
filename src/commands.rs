@@ -28,6 +28,9 @@ pub enum CommandResult {
     UserPanelHide,
     FocusChannels,
     FocusUsers,
+    Version,
+    Credits,
+    License,
     NoOp,
     Unknown(String),
 }
@@ -162,6 +165,9 @@ pub fn parse(line: &str) -> CommandResult {
         }
         "channels" => CommandResult::FocusChannels,
         "users" => CommandResult::FocusUsers,
+        "version" => CommandResult::Version,
+        "credits" => CommandResult::Credits,
+        "license" => CommandResult::License,
         _ => CommandResult::Unknown(format!("Unknown command: {}", cmd)),
     }
 }

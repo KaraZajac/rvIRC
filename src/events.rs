@@ -14,12 +14,20 @@ pub fn handle_key(
     channel_list_scroll_mode: bool,
     server_list_popup_visible: bool,
     whois_popup_visible: bool,
+    credits_popup_visible: bool,
+    license_popup_visible: bool,
 ) -> Option<KeyAction> {
     let key = match event {
         Event::Key(k) => k,
         _ => return None,
     };
 
+    if credits_popup_visible {
+        return Some(handle_credits_popup(key));
+    }
+    if license_popup_visible {
+        return Some(handle_license_popup(key));
+    }
     if whois_popup_visible {
         return Some(handle_whois_popup(key));
     }
@@ -73,6 +81,12 @@ pub enum KeyAction {
     ListPopupFilterChar(char),
     ListPopupBackspace,
     CloseWhoisPopup,
+    CloseCreditsPopup,
+    CloseLicensePopup,
+    LicenseScrollUp,
+    LicenseScrollDown,
+    LicenseScrollPageUp,
+    LicenseScrollPageDown,
     ServerListPopupUp,
     ServerListPopupDown,
     ServerListPopupSelect,
@@ -172,6 +186,24 @@ fn handle_user_action_menu(key: KeyEvent) -> KeyAction {
 fn handle_whois_popup(key: KeyEvent) -> KeyAction {
     match key.code {
         KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => KeyAction::CloseWhoisPopup,
+        _ => KeyAction::NoOp,
+    }
+}
+
+fn handle_credits_popup(key: KeyEvent) -> KeyAction {
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => KeyAction::CloseCreditsPopup,
+        _ => KeyAction::NoOp,
+    }
+}
+
+fn handle_license_popup(key: KeyEvent) -> KeyAction {
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => KeyAction::CloseLicensePopup,
+        KeyCode::Up | KeyCode::Char('k') => KeyAction::LicenseScrollUp,
+        KeyCode::Down | KeyCode::Char('j') => KeyAction::LicenseScrollDown,
+        KeyCode::PageUp => KeyAction::LicenseScrollPageUp,
+        KeyCode::PageDown => KeyAction::LicenseScrollPageDown,
         _ => KeyAction::NoOp,
     }
 }

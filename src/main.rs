@@ -196,7 +196,7 @@ fn main() -> Result<(), String> {
         let key_action = if let Ok(true) = event {
             crossterm::event::read()
                 .ok()
-                .and_then(|ev| handle_key(ev, app.mode, app.panel_focus, app.channel_panel_visible, app.user_panel_visible, app.user_action_menu, app.channel_list_popup_visible, app.channel_list_scroll_mode, app.server_list_popup_visible, app.whois_popup_visible))
+                .and_then(|ev| handle_key(ev, app.mode, app.panel_focus, app.channel_panel_visible, app.user_panel_visible, app.user_action_menu, app.channel_list_popup_visible, app.channel_list_scroll_mode, app.server_list_popup_visible, app.whois_popup_visible, app.credits_popup_visible, app.license_popup_visible))
         } else {
             None
         };
@@ -502,6 +502,25 @@ fn handle_key_action(
         }
         CloseWhoisPopup => {
             app.whois_popup_visible = false;
+        }
+        CloseCreditsPopup => {
+            app.credits_popup_visible = false;
+        }
+        CloseLicensePopup => {
+            app.license_popup_visible = false;
+            app.license_popup_scroll_offset = 0;
+        }
+        LicenseScrollUp => {
+            app.license_popup_scroll_offset = app.license_popup_scroll_offset.saturating_add(1);
+        }
+        LicenseScrollDown => {
+            app.license_popup_scroll_offset = app.license_popup_scroll_offset.saturating_sub(1);
+        }
+        LicenseScrollPageUp => {
+            app.license_popup_scroll_offset = app.license_popup_scroll_offset.saturating_add(15);
+        }
+        LicenseScrollPageDown => {
+            app.license_popup_scroll_offset = app.license_popup_scroll_offset.saturating_sub(15);
         }
         ServerListPopupClose => {
             app.server_list_popup_visible = false;
@@ -961,6 +980,15 @@ fn run_command(
                 app.panel_focus = PanelFocus::Channels;
             }
         }
+        R::Version => {
+            app.status_message = "rvIRC 1.0.0".to_string();
+        }
+        R::Credits => {
+            app.credits_popup_visible = true;
+        }
+        R::License => {
+            app.license_popup_visible = true;
+        }
         R::FocusUsers => {
             if app.user_panel_visible {
                 app.panel_focus = PanelFocus::Users;
@@ -985,6 +1013,7 @@ fn complete_input(app: &mut App) {
         "join", "part", "list", "servers", "connect", "reconnect", "quit", "q",
         "msg", "me", "nick", "topic", "kick", "ban", "channel", "chan", "c",
         "channel-panel", "user-panel", "channels", "users",
+        "version", "credits", "license",
     ];
     let input = &app.input;
     let cursor = app.input_cursor.min(input.len());

@@ -89,6 +89,13 @@ pub struct App {
     pub whois_nick: String,
     pub whois_lines: Vec<String>,
 
+    /// :credits popup.
+    pub credits_popup_visible: bool,
+    /// :license popup.
+    pub license_popup_visible: bool,
+    /// License popup vertical scroll (lines).
+    pub license_popup_scroll_offset: usize,
+
     /// Message area scroll: 0 = show latest; increase when user scrolls up (see older).
     pub message_scroll_offset: usize,
 
@@ -155,6 +162,9 @@ impl App {
             whois_popup_visible: false,
             whois_nick: String::new(),
             whois_lines: Vec::new(),
+            credits_popup_visible: false,
+            license_popup_visible: false,
+            license_popup_scroll_offset: 0,
             message_scroll_offset: 0,
             pending_auto_join: false,
             auto_join_after: None,
