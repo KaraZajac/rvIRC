@@ -977,7 +977,7 @@ fn run_command(
     Ok(false)
 }
 
-/// Tab completion: commands (after :) or nicks (in message).
+/// Tab completion: command name only (first word after :).
 fn complete_input(app: &mut App) {
     const COMMANDS: &[&str] = &[
         "join", "part", "list", "servers", "connect", "reconnect", "quit", "q",
@@ -986,42 +986,24 @@ fn complete_input(app: &mut App) {
     ];
     let input = &app.input;
     let cursor = app.input_cursor.min(input.len());
-    let (prefix, word_start) = if input.starts_with(':') {
-        let rest = &input[1..];
-        let first_space = rest.find(char::is_whitespace).unwrap_or(rest.len());
-        let first_word = rest[..first_space].to_lowercase();
-        if cursor <= 1 + first_space {
-            let partial = first_word.as_str();
-            let candidates: Vec<&str> = COMMANDS.iter().filter(|c| c.starts_with(partial)).copied().collect();
-            if candidates.len() == 1 {
-                app.input = format!(":{} ", candidates[0]);
-                app.input_cursor = app.input.len();
-            } else if candidates.len() > 1 {
-                let common = common_prefix(candidates.iter().copied());
-                if common != partial {
-                    app.input = format!(":{}", common);
-                    app.input_cursor = app.input.len();
-                }
-            }
-            return;
-        }
-        let from = 1 + first_space + rest[first_space..].trim_start().len();
-        let to = cursor;
-        (&input[..from], input[from..to].to_string())
-    } else {
-        let last_space = input[..cursor].rfind(char::is_whitespace).map(|i| i + 1).unwrap_or(0);
-        (&input[..last_space], input[last_space..cursor].to_string())
-    };
-    let partial = word_start.to_lowercase();
-    let nicks: Vec<String> = app.user_list.iter().map(|u| App::strip_user_prefix(u).to_string()).collect();
-    let candidates: Vec<String> = nicks.into_iter().filter(|n| n.to_lowercase().starts_with(partial.as_str())).collect();
+    if !input.starts_with(':') {
+        return;
+    }
+    let rest = &input[1..];
+    let first_space = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let first_word = rest[..first_space].to_lowercase();
+    if cursor > 1 + first_space {
+        return;
+    }
+    let partial = first_word.as_str();
+    let candidates: Vec<&str> = COMMANDS.iter().filter(|c| c.starts_with(partial)).copied().collect();
     if candidates.len() == 1 {
-        app.input = format!("{}{}", prefix, candidates[0]);
+        app.input = format!(":{} ", candidates[0]);
         app.input_cursor = app.input.len();
     } else if candidates.len() > 1 {
-        let common = common_prefix(candidates.iter().map(String::as_str));
+        let common = common_prefix(candidates.iter().copied());
         if common != partial {
-            app.input = format!("{}{}", prefix, common);
+            app.input = format!(":{}", common);
             app.input_cursor = app.input.len();
         }
     }

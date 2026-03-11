@@ -15,3 +15,4 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 directories = "5"
 futures-util = "0.3"
+unicode-width = "0.1"

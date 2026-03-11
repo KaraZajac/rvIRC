@@ -8,9 +8,30 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
+use unicode_width::UnicodeWidthStr;
 
 const CHANNELS_PANE_WIDTH: u16 = 22;
 const USERS_PANE_WIDTH: u16 = 18;
+
+/// Width in terminal cells of the input bar content (prompt + input + cursor if shown).
+fn input_content_width(app: &App, show_cursor: bool) -> usize {
+    let prompt = if app.mode == Mode::Command { ":" } else { "" };
+    let before = &app.input[..app.input_cursor.min(app.input.len())];
+    let after = app.input.get(app.input_cursor..).unwrap_or("");
+    let cursor_cell = if show_cursor { 1 } else { 0 };
+    prompt.width() + before.width() + cursor_cell + after.width()
+}
+
+/// Number of lines the input content would wrap to at the given inner width (excluding borders).
+fn input_wrapped_line_count(app: &App, inner_width: u16) -> usize {
+    let show_cursor = app.mode == Mode::Insert || app.mode == Mode::Command;
+    let w = input_content_width(app, show_cursor);
+    let width = inner_width as usize;
+    if width == 0 {
+        return 1;
+    }
+    ((w + width - 1) / width).max(1)
+}
 
 /// Popup style: use terminal default background so popups match the terminal.
 fn popup_overlay_style() -> Style {
@@ -19,12 +40,16 @@ fn popup_overlay_style() -> Style {
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
-    // Vertical: messages (dynamic), input (3 lines), status (1 line)
+    // Input height grows with wrapped lines (1–10 content lines + 2 borders), resets when message is sent
+    let input_inner_width = area.width.saturating_sub(2);
+    let input_content_lines = input_wrapped_line_count(app, input_inner_width);
+    let input_height = (input_content_lines + 2).min(12).max(3) as u16;
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),
-            Constraint::Length(3),
+            Constraint::Length(input_height),
             Constraint::Length(1),
         ])
         .split(area);
@@ -162,6 +187,7 @@ fn draw_input_bar(f: &mut Frame, area: Rect, app: &App) {
     };
     let paragraph = Paragraph::new(line)
         .block(Block::default().borders(Borders::ALL).title(" Input "))
+        .wrap(Wrap { trim: true })
         .style(Style::default());
     f.render_widget(paragraph, area);
 }
