@@ -215,12 +215,19 @@ fn draw_channels_pane(f: &mut Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(i, t)| {
             let label = target_display_label(app, t);
-            let line = if show_selector && i == app.channel_index {
+            let line_str = if show_selector && i == app.channel_index {
                 format!("> {}  ", label)
             } else {
                 format!("  {}  ", label)
             };
-            ListItem::new(line)
+            let style = if app.unread_mentions.contains(t) {
+                Style::default().fg(Color::Red)
+            } else if app.unread_targets.contains(t) {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default()
+            };
+            ListItem::new(Line::from(Span::styled(line_str, style)))
         })
         .collect();
     let list = List::new(items)

@@ -1,6 +1,6 @@
 //! App state: mode, channels, users, message buffers, input, pane visibility.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +111,11 @@ pub struct App {
     pub input_history_index: usize, // 0 = not browsing; when > 0 we show history[index - 1]
     pub input_draft: String,        // saved when browsing history, restored when Down to 0
 
+    /// Targets with unread messages (channel/DM name). Cleared when we switch to that target.
+    pub unread_targets: HashSet<String>,
+    /// Targets with an unread mention (our nick in message). Red in channel list; cleared on view.
+    pub unread_mentions: HashSet<String>,
+
     pub status_message: String,
 }
 
@@ -155,8 +160,16 @@ impl App {
             input_history: Vec::new(),
             input_history_index: 0,
             input_draft: String::new(),
+            unread_targets: HashSet::new(),
+            unread_mentions: HashSet::new(),
             status_message: String::new(),
         }
+    }
+
+    /// Clear unread/mention state for a target when user switches to it.
+    pub fn mark_target_read(&mut self, target: &str) {
+        self.unread_targets.remove(target);
+        self.unread_mentions.remove(target);
     }
 
     /// Filtered server channel list for the :list popup (substring match on name, case-insensitive).
@@ -267,7 +280,15 @@ impl App {
         self.messages
             .entry(target.to_string())
             .or_default()
-            .push(line);
+            .push(line.clone());
+        let current = self.current_channel.as_deref().unwrap_or("");
+        if target != current {
+            self.unread_targets.insert(target.to_string());
+            let nick = self.current_nickname.as_deref().unwrap_or("");
+            if !nick.is_empty() && line.text.to_lowercase().contains(&nick.to_lowercase()) {
+                self.unread_mentions.insert(target.to_string());
+            }
+        }
     }
 
     #[allow(dead_code)]

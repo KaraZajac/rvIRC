@@ -51,6 +51,7 @@ fn main() -> Result<(), String> {
                         client = Some(c);
                         app.current_nickname = config.nickname.clone();
                         app.current_channel = Some("*server*".to_string());
+                        app.mark_target_read("*server*");
                         app.channel_index = 0;
                         app.status_message = format!("Auto-connecting to {}...", server.name);
                         if let Some(ref pw) = server.identify_password {
@@ -125,6 +126,7 @@ fn main() -> Result<(), String> {
                         }
                         if let Some(first) = channels.first() {
                             app.current_channel = Some(first.clone());
+                            app.mark_target_read(first);
                             app.sync_channel_index_to_current();
                         }
                         if !channels.is_empty() {
@@ -191,6 +193,9 @@ fn apply_irc_message(app: &mut App, msg: IrcMessage) {
             app.clamp_channel_index();
             if app.current_channel.as_deref() == Some(ch.as_str()) {
                 app.current_channel = app.selected_target();
+                if let Some(t) = app.current_channel.clone() {
+                    app.mark_target_read(&t);
+                }
             }
         }
         M::UserList { channel, users } => {
@@ -230,6 +235,8 @@ fn apply_irc_message(app: &mut App, msg: IrcMessage) {
             app.current_server = None;
             app.current_channel = None;
             app.current_nickname = None;
+            app.unread_targets.clear();
+            app.unread_mentions.clear();
             app.channel_list.clear();
             app.dm_targets.clear();
             app.user_list.clear();
@@ -297,6 +304,7 @@ fn handle_key_action(
         ChannelSelect => {
             if let Some(target) = app.selected_channel() {
                 app.current_channel = Some(target.clone());
+                app.mark_target_read(&target);
                 app.user_list.clear();
                 app.message_scroll_offset = 0;
                 if target.starts_with('#') || target.starts_with('&') {
@@ -414,6 +422,7 @@ fn handle_key_action(
                         app.channel_list.push(ch.clone());
                     }
                     app.current_channel = Some(ch.clone());
+                    app.mark_target_read(&ch);
                     app.sync_channel_index_to_current();
                     app.message_scroll_offset = 0;
                     app.status_message = format!("Joined {}", ch);
@@ -463,6 +472,7 @@ fn handle_key_action(
                             *client = Some(c);
                             app.current_nickname = config.nickname.clone();
                             app.current_channel = Some("*server*".to_string());
+                            app.mark_target_read("*server*");
                             app.channel_index = 0;
                             if let Some(ref pw) = server.identify_password {
                                 if let Some(ref c) = client {
@@ -630,6 +640,7 @@ fn run_command(
                 let _ = c.send_topic(&ch, "");
                 app.channel_list.push(ch.clone());
                 app.current_channel = Some(ch.clone());
+                app.mark_target_read(&ch);
                 app.sync_channel_index_to_current();
                 app.message_scroll_offset = 0;
                 app.status_message = format!("Joined {}", ch);
@@ -643,6 +654,9 @@ fn run_command(
                 app.channel_list.retain(|x| x != &ch);
                 app.clamp_channel_index();
                 app.current_channel = app.selected_target();
+                if let Some(t) = app.current_channel.clone() {
+                    app.mark_target_read(&t);
+                }
             }
         }
         R::Part(None) => {
@@ -655,6 +669,9 @@ fn run_command(
                 }
                 app.clamp_channel_index();
                 app.current_channel = app.selected_target();
+                if let Some(t) = app.current_channel.clone() {
+                    app.mark_target_read(&t);
+                }
             }
         }
         R::List => {
@@ -677,8 +694,8 @@ fn run_command(
             app.clamp_server_list_selected_index();
         }
         R::Reconnect => {
-            if let Some(ref server_name) = app.current_server {
-                if let Some(server) = config.server_by_name(server_name) {
+            if let Some(server_name) = app.current_server.clone() {
+                if let Some(server) = config.server_by_name(&server_name) {
                     if let Some(h) = stream_handle.take() {
                         h.abort();
                     }
@@ -691,6 +708,7 @@ fn run_command(
                             *client = Some(c);
                             app.current_nickname = config.nickname.clone();
                             app.current_channel = Some("*server*".to_string());
+                            app.mark_target_read("*server*");
                             app.channel_index = 0;
                             if let Some(ref pw) = server.identify_password {
                                 if let Some(ref c) = client {
@@ -701,7 +719,7 @@ fn run_command(
                             } else {
                                 app.auto_join_after = None;
                             }
-                            app.status_message = format!("Reconnected to {}.", server_name);
+                            app.status_message = format!("Reconnected to {}.", &server_name);
                         }
                         Err(e) => app.status_message = e,
                     }
@@ -732,6 +750,7 @@ fn run_command(
                             *client = Some(c);
                             app.current_nickname = config.nickname.clone();
                             app.current_channel = Some("*server*".to_string());
+                            app.mark_target_read("*server*");
                             app.channel_index = 0;
                             if let Some(ref pw) = server.identify_password {
                                 if let Some(ref c) = client {
@@ -760,6 +779,8 @@ fn run_command(
             drop(client.take());
             app.current_server = None;
             app.current_channel = None;
+            app.unread_targets.clear();
+            app.unread_mentions.clear();
             app.channel_list.clear();
             app.user_list.clear();
             app.status_message = "Disconnected.".to_string();
@@ -846,7 +867,8 @@ fn run_command(
             }
         }
         R::SwitchChannel(ch) => {
-            app.current_channel = Some(ch);
+            app.current_channel = Some(ch.clone());
+            app.mark_target_read(&ch);
             app.sync_channel_index_to_current();
             app.message_scroll_offset = 0;
         }

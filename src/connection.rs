@@ -313,7 +313,8 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx) {
                     _ => {}
                 }
 
-                let should_skip_line = matches!(&msg.command, C::PRIVMSG(_, t) if parse_ctcp(t).is_some());
+                let should_skip_line = matches!(&msg.command, C::PRIVMSG(_, t) if parse_ctcp(t).is_some())
+                    || matches!(&msg.command, C::Response(_, _));
                 if !should_skip_line {
                     if let Some((target, line)) = message_line(&msg) {
                     let _ = tx.send(IrcMessage::Line {
