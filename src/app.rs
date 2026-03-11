@@ -116,6 +116,11 @@ pub struct App {
     /// Targets with an unread mention (our nick in message). Red in channel list; cleared on view.
     pub unread_mentions: HashSet<String>,
 
+    /// Auto-reconnect after disconnect: server name, when to try next, attempt (1..=3). Delays: 5s, 15s, 30s.
+    pub reconnect_server: Option<String>,
+    pub reconnect_after: Option<Instant>,
+    pub reconnect_attempt: u8,
+
     pub status_message: String,
 }
 
@@ -162,8 +167,18 @@ impl App {
             input_draft: String::new(),
             unread_targets: HashSet::new(),
             unread_mentions: HashSet::new(),
+            reconnect_server: None,
+            reconnect_after: None,
+            reconnect_attempt: 0,
             status_message: String::new(),
         }
+    }
+
+    /// Clear auto-reconnect state (e.g. after manual connect or quit).
+    pub fn clear_reconnect(&mut self) {
+        self.reconnect_server = None;
+        self.reconnect_after = None;
+        self.reconnect_attempt = 0;
     }
 
     /// Clear unread/mention state for a target when user switches to it.

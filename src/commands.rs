@@ -6,7 +6,7 @@ use crate::app::UserAction;
 #[allow(dead_code)]
 pub enum CommandResult {
     SendPrivmsg { target: String, text: String },
-    Join(String),
+    Join { channel: String, key: Option<String> },
     Part(Option<String>),
     List,
     Servers,
@@ -44,13 +44,15 @@ pub fn parse(line: &str) -> CommandResult {
 
     match cmd.as_str() {
         "join" => {
-            let channel = rest.split_whitespace().next().unwrap_or("").to_string();
+            let mut parts = rest.split_whitespace();
+            let channel = parts.next().unwrap_or("").to_string();
+            let key = parts.next().map(String::from);
             if channel.starts_with('#') || channel.starts_with('&') {
-                CommandResult::Join(channel)
+                CommandResult::Join { channel, key }
             } else if !channel.is_empty() {
-                CommandResult::Join(format!("#{}", channel))
+                CommandResult::Join { channel: format!("#{}", channel), key }
             } else {
-                CommandResult::StatusMessage("Usage: :join #channel".to_string())
+                CommandResult::StatusMessage("Usage: :join #channel [key]".to_string())
             }
         }
         "part" | "leave" => {

@@ -14,6 +14,7 @@
 - **Commands**: `:connect`, `:servers`, `:join`, `:list`, `:part`, `:msg`, `:quit`, and more (see below).
 - **Panes**: Channels (left) and users (right). Toggle with `c` / `u`; j/k or arrows + Enter to switch channel or open user actions (DM, whois, etc.).
 - **Config**: `~/.config/rvIRC/config.toml` — multiple servers, nickname, optional NickServ identify and auto-join. Connect order: connect → identify with NickServ (if set) → then auto-join channels.
+- **Auto-reconnect**: After an unexpected disconnect, the client retries up to 3 times (5s, 15s, 30s). Manual `:connect` or `:quit` cancels auto-reconnect.
 
 ## Build & run
 
@@ -31,7 +32,7 @@ Type `:` to enter COMMAND mode, then run any of these (case-insensitive):
 | `connect <name>` / `server <name>` | Connect to a server by config name |
 | `servers` | Show server list from config; pick one to connect |
 | `reconnect` | Reconnect to the current server |
-| `join #channel` | Join a channel (`#` added if omitted) |
+| `join #channel [key]` | Join a channel (`#` added if omitted); optional key for keyed channels |
 | `part` / `leave` | Part current channel; `part #chan` parts specific channel |
 | `list` | Fetch and show channel list (popup); type to filter, Enter to join |
 | `msg <nick> <text>` / `query` | Send a private message |

@@ -137,6 +137,60 @@ fn main() -> Result<(), String> {
             }
         }
 
+        // Auto-reconnect: 3 attempts at 5s, 15s, 30s after disconnect
+        if client.is_none()
+            && app.reconnect_after.is_some()
+            && std::time::Instant::now() >= app.reconnect_after.unwrap()
+        {
+            let server_name = app.reconnect_server.clone();
+            app.reconnect_after = None;
+            if let Some(server_name) = server_name {
+                if let Some(server) = config.server_by_name(&server_name) {
+                    app.status_message = format!("Reconnecting to {} (attempt {})...", server_name, app.reconnect_attempt);
+                    match connect(server, &config, irc_tx.clone(), &rt) {
+                        Ok((c, stream)) => {
+                            let tx = irc_tx.clone();
+                            let handle = rt.spawn(async move { run_stream(stream, tx).await });
+                            stream_handle = Some(handle);
+                            client = Some(c);
+                            app.current_nickname = config.nickname.clone();
+                            app.current_channel = Some("*server*".to_string());
+                            app.mark_target_read("*server*");
+                            app.channel_index = 0;
+                            app.clear_reconnect();
+                            if let Some(ref pw) = server.identify_password {
+                                if let Some(ref c) = client {
+                                    let _ = c.send_privmsg("NickServ", &format!("IDENTIFY {}", pw));
+                                    app.status_message = "Identifying with NickServ...".to_string();
+                                }
+                                app.auto_join_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+                            } else {
+                                app.auto_join_after = None;
+                            }
+                            app.status_message = format!("Reconnected to {}.", server_name);
+                        }
+                        Err(e) => {
+                            if app.reconnect_attempt < 3 {
+                                app.reconnect_attempt += 1;
+                                let delay_secs = if app.reconnect_attempt == 2 { 15 } else { 30 };
+                                app.reconnect_after =
+                                    Some(std::time::Instant::now() + std::time::Duration::from_secs(delay_secs));
+                                app.reconnect_server = Some(server_name);
+                                app.status_message = format!("Reconnect failed: {}. Retry in {}s.", e, delay_secs);
+                            } else {
+                                app.clear_reconnect();
+                                app.status_message = format!("Reconnect failed after 3 attempts: {}", e);
+                            }
+                        }
+                    }
+                } else {
+                    app.clear_reconnect();
+                }
+            } else {
+                app.clear_reconnect();
+            }
+        }
+
         // Poll key with short timeout so we can process IRC messages
         let event = crossterm::event::poll(std::time::Duration::from_millis(50));
         let key_action = if let Ok(true) = event {
@@ -232,6 +286,7 @@ fn apply_irc_message(app: &mut App, msg: IrcMessage) {
             app.pending_auto_join = true;
         }
         M::Disconnected => {
+            let server_for_reconnect = app.current_server.clone();
             app.current_server = None;
             app.current_channel = None;
             app.current_nickname = None;
@@ -254,6 +309,11 @@ fn apply_irc_message(app: &mut App, msg: IrcMessage) {
             app.channel_modes.clear();
             app.last_invite = None;
             app.status_message = "Disconnected.".to_string();
+            if let Some(server) = server_for_reconnect {
+                app.reconnect_server = Some(server);
+                app.reconnect_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
+                app.reconnect_attempt = 1;
+            }
         }
     }
 }
@@ -458,6 +518,7 @@ fn handle_key_action(
             if let Some(name) = app.selected_server_name() {
                 app.server_list_popup_visible = false;
                 if let Some(server) = config.server_by_name(&name) {
+                    app.clear_reconnect();
                     if let Some(h) = stream_handle.take() {
                         h.abort();
                     }
@@ -634,9 +695,13 @@ fn run_command(
     let result = commands::parse(line);
     use commands::CommandResult as R;
     match result {
-        R::Join(ch) => {
+        R::Join { channel: ch, key } => {
             if let Some(ref c) = client {
-                c.send_join(&ch).map_err(|e| e.to_string())?;
+                if let Some(ref k) = key {
+                    c.send_join_with_keys(&ch, k).map_err(|e| e.to_string())?;
+                } else {
+                    c.send_join(&ch).map_err(|e| e.to_string())?;
+                }
                 let _ = c.send_topic(&ch, "");
                 app.channel_list.push(ch.clone());
                 app.current_channel = Some(ch.clone());
@@ -736,6 +801,7 @@ fn run_command(
                     app.status_message = format!("Unknown server: {}", name);
                 }
                 Some(server) => {
+                    app.clear_reconnect();
                     if let Some(h) = stream_handle.take() {
                         h.abort();
                     }
@@ -770,6 +836,7 @@ fn run_command(
             }
         }
         R::Quit(_) => {
+            app.clear_reconnect();
             if let Some(ref c) = client {
                 let _ = c.send_quit("");
             }
