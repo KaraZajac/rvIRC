@@ -115,7 +115,18 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx) {
     use futures_util::StreamExt;
     let mut pending_users: HashMap<String, Vec<String>> = HashMap::new();
     let mut pending_list: Vec<(String, Option<u32>)> = Vec::new();
-    let mut pending_whois: Vec<String> = Vec::new();
+    #[derive(Default)]
+    struct PendingWhois {
+        nick: Option<String>,
+        username: Option<String>,
+        real_name: Option<String>,
+        host: Option<String>,
+        server: Option<String>,
+        server_info: Option<String>,
+        channels: Option<String>,
+        extra: Vec<String>,
+    }
+    let mut pending_whois: PendingWhois = PendingWhois::default();
 
     while let Some(result) = stream.next().await {
         match result {
@@ -145,46 +156,75 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx) {
                     }
                     C::Response(Response::ERR_NOSUCHNICK, args) => {
                         if args.len() >= 2 {
-                            pending_whois.push(format!("{} :No such nick/channel", args[1]));
+                            pending_whois = PendingWhois::default();
+                            pending_whois.nick = Some(args[1].clone());
+                            pending_whois.extra.push("No such nick/channel".to_string());
                         }
                     }
                     C::Response(Response::RPL_WHOISUSER, args) => {
                         if args.len() >= 5 {
-                            pending_whois.clear(); // 311 starts a new whois reply; drop any prior 401 etc.
-                            let real = args.get(5).cloned().unwrap_or_else(|| "*".to_string());
-                            pending_whois.push(format!(
-                                "{} ({}@{}) * :{}",
-                                args[1], args[2], args[3], real
-                            ));
+                            pending_whois = PendingWhois::default();
+                            pending_whois.nick = Some(args[1].clone());
+                            pending_whois.username = Some(args[2].clone());
+                            pending_whois.host = Some(args[3].clone());
+                            pending_whois.real_name = args.get(5).cloned();
                         }
                     }
                     C::Response(Response::RPL_WHOISSERVER, args) => {
                         if args.len() >= 3 {
-                            let info = args.get(3).cloned().unwrap_or_default();
-                            pending_whois.push(format!("{} {} :{}", args[1], args[2], info));
+                            pending_whois.server = Some(args[2].clone());
+                            pending_whois.server_info = args.get(3).cloned().filter(|s| !s.is_empty());
                         }
                     }
                     C::Response(Response::RPL_WHOISOPERATOR, args) => {
                         if args.len() >= 2 {
-                            pending_whois.push(format!("{} :is an IRC operator", args[1]));
+                            pending_whois.extra.push("IRC operator".to_string());
                         }
                     }
                     C::Response(Response::RPL_WHOISIDLE, args) => {
                         if args.len() >= 3 {
                             let comment = args.get(4).cloned().unwrap_or_else(|| "seconds idle".to_string());
-                            pending_whois.push(format!("{} {} :{}", args[1], args[2], comment));
+                            pending_whois.extra.push(format!("Idle: {} {}", args[2], comment));
                         }
                     }
                     C::Response(Response::RPL_WHOISCHANNELS, args) => {
                         if args.len() >= 3 {
-                            pending_whois.push(format!("{} :{}", args[1], args[2]));
+                            pending_whois.channels = Some(args[2].clone());
                         }
                     }
                     C::Response(Response::RPL_ENDOFWHOIS, args) => {
                         if args.len() >= 2 {
                             let nick = args[1].clone();
-                            let lines = std::mem::take(&mut pending_whois);
+                            let mut lines: Vec<String> = Vec::new();
+                            if let Some(n) = pending_whois.nick.as_ref() {
+                                lines.push(format!("Nick: {}", n));
+                            }
+                            if let Some(u) = pending_whois.username.as_ref() {
+                                lines.push(format!("Username: {}", u));
+                            }
+                            if let Some(r) = pending_whois.real_name.as_ref() {
+                                lines.push(format!("Real Name: {}", r));
+                            }
+                            if let Some(h) = pending_whois.host.as_ref() {
+                                lines.push(format!("Host: {}", h));
+                            }
+                            if let Some(s) = pending_whois.server.as_ref() {
+                                lines.push(format!("Server: {}", s));
+                            }
+                            if let Some(c) = pending_whois.channels.as_ref() {
+                                lines.push(format!("Channels: {}", c));
+                            }
+                            if let Some(l) = pending_whois.server_info.as_ref() {
+                                lines.push(format!("Location: {}", l));
+                            }
+                            for e in &pending_whois.extra {
+                                lines.push(e.clone());
+                            }
+                            if lines.is_empty() {
+                                lines.push("(no whois data)".to_string());
+                            }
                             let _ = tx.send(IrcMessage::WhoisResult { nick, lines });
+                            pending_whois = PendingWhois::default();
                         }
                     }
                     C::Response(Response::RPL_LIST, args) => {

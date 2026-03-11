@@ -415,8 +415,8 @@ fn draw_server_list_popup(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_whois_popup(f: &mut Frame, area: Rect, app: &App) {
-    let popup_width = (area.width * 3 / 4).min(56).max(28);
-    let popup_height = (area.height * 3 / 4).min(20).max(8);
+    let popup_width = (area.width * 3 / 4).min(72).max(40);
+    let popup_height = (area.height * 3 / 4).min(24).max(10);
     let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
     let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
     let popup_rect = Rect {
@@ -427,7 +427,7 @@ fn draw_whois_popup(f: &mut Frame, area: Rect, app: &App) {
     };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(2)])
+        .constraints([Constraint::Min(2), Constraint::Length(1)])
         .margin(1)
         .split(popup_rect);
 
@@ -444,25 +444,18 @@ fn draw_whois_popup(f: &mut Frame, area: Rect, app: &App) {
         .style(popup_style);
     f.render_widget(block, popup_rect);
 
-    let lines: Vec<ListItem> = if app.whois_lines.is_empty() {
-        vec![ListItem::new("  (no data)  ")]
+    let text = if app.whois_lines.is_empty() {
+        "(no data)".to_string()
     } else {
-        app.whois_lines
-            .iter()
-            .map(|s| ListItem::new(format!("  {}  ", s)))
-            .collect()
+        app.whois_lines.join("\n")
     };
-    let list = List::new(lines).style(popup_style);
-    f.render_widget(list, chunks[0]);
+    let para = Paragraph::new(text)
+        .style(popup_style)
+        .wrap(Wrap { trim: true });
+    f.render_widget(para, chunks[0]);
 
     let hint = Paragraph::new("Esc / Enter / q to close").style(popup_style.add_modifier(Modifier::DIM));
-    let hint_rect = Rect {
-        x: popup_rect.x,
-        y: popup_rect.y + popup_rect.height.saturating_sub(1),
-        width: popup_rect.width,
-        height: 1,
-    };
-    f.render_widget(hint, hint_rect);
+    f.render_widget(hint, chunks[1]);
 }
 
 fn action_label(a: &UserAction) -> &'static str {
