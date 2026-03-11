@@ -85,6 +85,9 @@ pub enum KeyAction {
     Backspace,
     Enter,
     Esc,
+    InputHistoryUp,
+    InputHistoryDown,
+    TabComplete,
 }
 
 fn handle_normal(key: KeyEvent, panel_focus: PanelFocus) -> Option<KeyAction> {
@@ -114,6 +117,9 @@ fn handle_insert(key: KeyEvent) -> Option<KeyAction> {
         (KeyCode::Esc, _) => Some(KeyAction::Esc),
         (KeyCode::Enter, _) => Some(KeyAction::Enter),
         (KeyCode::Backspace, _) => Some(KeyAction::Backspace),
+        (KeyCode::Up, _) => Some(KeyAction::InputHistoryUp),
+        (KeyCode::Down, _) => Some(KeyAction::InputHistoryDown),
+        (KeyCode::Tab, _) => Some(KeyAction::TabComplete),
         (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => Some(KeyAction::Char(c)),
         _ => None,
     }
@@ -125,6 +131,9 @@ fn handle_command(key: KeyEvent) -> Option<KeyAction> {
         (KeyCode::Esc, _) => Some(KeyAction::Esc),
         (KeyCode::Enter, _) => Some(KeyAction::Enter),
         (KeyCode::Backspace, _) => Some(KeyAction::Backspace),
+        (KeyCode::Up, _) => Some(KeyAction::InputHistoryUp),
+        (KeyCode::Down, _) => Some(KeyAction::InputHistoryDown),
+        (KeyCode::Tab, _) => Some(KeyAction::TabComplete),
         (KeyCode::Char(c), _) => Some(KeyAction::Char(c)),
         _ => None,
     }

@@ -23,6 +23,16 @@ pub enum IrcMessage {
     Connected { server: String },
     Disconnected,
     WhoisResult { nick: String, lines: Vec<String> },
+    /// Channel topic (332). None = no topic (331).
+    Topic { channel: String, topic: Option<String> },
+    /// Channel modes (324): +modes mode_params
+    ChannelModes { channel: String, modes: String },
+    /// INVITE nick channel
+    Invite { nick: String, channel: String },
+    /// 433: nickname in use, try alt
+    NickInUse,
+    /// Incoming CTCP request (VERSION, PING, TIME) - main loop sends reply.
+    CtcpRequest { from_nick: String, target: String, tag: String, data: String },
 }
 
 fn server_entry_to_irc_config(entry: &ServerEntry, rv: &RvConfig) -> IrcConfig {
@@ -238,10 +248,74 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx) {
                         let list = std::mem::take(&mut pending_list);
                         let _ = tx.send(IrcMessage::ChannelList(list));
                     }
+                    C::Response(Response::RPL_TOPIC, args) => {
+                        if args.len() >= 3 {
+                            let channel = args[1].clone();
+                            let topic = args.get(2).cloned();
+                            let _ = tx.send(IrcMessage::Topic {
+                                channel,
+                                topic,
+                            });
+                        }
+                    }
+                    C::Response(Response::RPL_NOTOPIC, args) => {
+                        if args.len() >= 2 {
+                            let _ = tx.send(IrcMessage::Topic {
+                                channel: args[1].clone(),
+                                topic: None,
+                            });
+                        }
+                    }
+                    C::Response(Response::RPL_CHANNELMODEIS, args) => {
+                        if args.len() >= 3 {
+                            let channel = args[1].clone();
+                            let modes = args[2].clone();
+                            let params = args.get(3).cloned().unwrap_or_default();
+                            let full = if params.is_empty() { modes } else { format!("{} {}", modes, params) };
+                            let _ = tx.send(IrcMessage::ChannelModes {
+                                channel,
+                                modes: full,
+                            });
+                        }
+                    }
+                    C::Response(Response::ERR_NICKNAMEINUSE, _) => {
+                        let _ = tx.send(IrcMessage::NickInUse);
+                    }
+                    C::INVITE(ref _nick, ref channel) => {
+                        let _ = tx.send(IrcMessage::Invite {
+                            nick: prefix_nick(msg.prefix.as_ref()),
+                            channel: channel.clone(),
+                        });
+                    }
+                    C::PRIVMSG(ref target, ref text) => {
+                        if let Some((tag, data)) = parse_ctcp(text) {
+                            if tag == "ACTION" {
+                                let source = prefix_nick(msg.prefix.as_ref());
+                                let _ = tx.send(IrcMessage::Line {
+                                    target: target.clone(),
+                                    line: MessageLine {
+                                        source,
+                                        text: data,
+                                        kind: MessageKind::Action,
+                                    },
+                                });
+                            } else if matches!(tag.as_str(), "VERSION" | "PING" | "TIME") {
+                                let from_nick = prefix_nick(msg.prefix.as_ref());
+                                let _ = tx.send(IrcMessage::CtcpRequest {
+                                    from_nick,
+                                    target: target.clone(),
+                                    tag: tag.clone(),
+                                    data: data.clone(),
+                                });
+                            }
+                        }
+                    }
                     _ => {}
                 }
 
-                if let Some((target, line)) = message_line(&msg) {
+                let should_skip_line = matches!(&msg.command, C::PRIVMSG(_, t) if parse_ctcp(t).is_some());
+                if !should_skip_line {
+                    if let Some((target, line)) = message_line(&msg) {
                     let _ = tx.send(IrcMessage::Line {
                         target: target.clone(),
                         line: line.clone(),
@@ -256,9 +330,23 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx) {
                         _ => {}
                     }
                 }
+                }
             }
             Err(_) => break,
         }
     }
     let _ = tx.send(IrcMessage::Disconnected);
+}
+
+/// Parse CTCP (\x01TAG data\x01). Returns (TAG, data) or None.
+fn parse_ctcp(text: &str) -> Option<(String, String)> {
+    let t = text.trim();
+    if !t.starts_with('\x01') || !t.ends_with('\x01') {
+        return None;
+    }
+    let inner = t[1..t.len() - 1].trim();
+    let mut split = inner.splitn(2, char::is_whitespace);
+    let tag = split.next()?.to_string();
+    let data = split.next().unwrap_or("").to_string();
+    Some((tag, data))
 }

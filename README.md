@@ -28,10 +28,16 @@ Type `:` to enter COMMAND mode, then run any of these (case-insensitive):
 |--------|-------------|
 | `connect <name>` / `server <name>` | Connect to a server by config name |
 | `servers` | Show server list from config; pick one to connect |
+| `reconnect` | Reconnect to the current server |
 | `join #channel` | Join a channel (`#` added if omitted) |
 | `part` / `leave` | Part current channel; `part #chan` parts specific channel |
 | `list` | Fetch and show channel list (popup); type to filter, Enter to join |
 | `msg <nick> <text>` / `query` | Send a private message |
+| `me <action text>` | Send an action (/me) to the current channel or DM |
+| `nick <newnick>` | Change your nickname |
+| `topic` | Show current channel topic; `topic <text>` to set it (if op) |
+| `kick [channel] <nick> [reason]` | Kick user from channel |
+| `ban [channel] <mask>` | Set ban mask on channel (e.g. `*!*@host` or `nick!*@*`) |
 | `channel #chan` / `chan` / `c #chan` | Switch to channel/DM by name |
 | `quit` / `exit` / `q` | Disconnect and quit |
 | `channel-panel show` / `hide` | Show or hide the channels pane |
@@ -56,6 +62,8 @@ Type `:` to enter COMMAND mode, then run any of these (case-insensitive):
 ### INSERT / COMMAND mode
 
 - Type your message or command; **Enter** to send, **Esc** to return to NORMAL.
+- **↑ / ↓** — Input history (previous/next line).
+- **Tab** — Complete nicks (from user list) or `:command` names.
 
 ### Channels pane (when focused)
 
@@ -73,6 +81,8 @@ Type `:` to enter COMMAND mode, then run any of these (case-insensitive):
 | Enter | Open user action menu (DM, Kick, Ban, Mute, Whois) |
 | `u` / Esc | Unfocus pane |
 
+User actions: **Kick** and **Ban** perform the IRC command (current channel). **Mute** hides that nick’s messages locally.
+
 ### Popups
 
 - **:servers** — j/k or arrows to move, **Enter** to connect, **Esc** to close.
@@ -86,6 +96,7 @@ Config path: `~/.config/rvIRC/config.toml`. If missing, the app creates the dire
 ```toml
 username = "myuser"
 nickname = "mynick"
+# alt_nick = "mynick_"   # optional: used if primary nick is in use (433)
 real_name = "My Name"
 
 [[servers]]
@@ -111,6 +122,8 @@ tls = false
 ```
 
 Connect flow: connect to server → identify with NickServ (if `identify_password` is set) → then auto-join channels from `auto_join`.
+
+The message area shows **channel topic** and **modes** (e.g. `+nt`) when available. Messages that **mention your nick** are highlighted. When someone **invites** you to a channel, the status line shows the invite and you can `:join #channel` to accept. The client replies to **CTCP** VERSION, PING, and TIME.
 
 ## License
 

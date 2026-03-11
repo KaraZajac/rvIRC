@@ -8,6 +8,9 @@ use std::path::PathBuf;
 pub struct RvConfig {
     pub username: Option<String>,
     pub nickname: Option<String>,
+    /// Alternate nickname if primary is in use (used on 433).
+    #[serde(default)]
+    pub alt_nick: Option<String>,
     pub real_name: Option<String>,
     #[serde(default)]
     pub servers: Vec<ServerEntry>,
@@ -100,6 +103,7 @@ impl RvConfig {
         RvConfig {
             username: Some("user".to_string()),
             nickname: Some("rvirc_user".to_string()),
+            alt_nick: None,
             real_name: Some("rvIRC User".to_string()),
             servers: vec![
                 ServerEntry {

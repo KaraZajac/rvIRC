@@ -70,12 +70,30 @@ pub fn draw(f: &mut Frame, app: &App) {
 }
 
 fn draw_message_area(f: &mut Frame, area: Rect, app: &App) {
+    let target_key = app.current_channel.as_deref().unwrap_or("*server*");
     let messages = app.current_messages();
     let all_lines: Vec<Line> = messages
         .iter()
-        .map(|m| format_message_line(m))
+        .filter(|m| !app.is_muted(target_key, &m.source))
+        .map(|m| format_message_line(m, app.current_nickname.as_deref()))
         .collect();
-    let visible_rows = area.height.saturating_sub(2) as usize;
+    let mut header_lines: Vec<Line> = Vec::new();
+    if let Some(topic) = app.current_topic() {
+        header_lines.push(Line::from(Span::styled(
+            format!(" Topic: {} ", topic),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
+        )));
+    }
+    if let Some(modes) = app.current_modes() {
+        header_lines.push(Line::from(Span::styled(
+            format!(" Modes: {} ", modes),
+            Style::default().fg(Color::Green).add_modifier(Modifier::DIM),
+        )));
+    }
+    let visible_rows = area
+        .height
+        .saturating_sub(2)
+        .saturating_sub(header_lines.len() as u16) as usize;
     let (start, end) = if all_lines.len() <= visible_rows {
         (0, all_lines.len())
     } else {
@@ -89,17 +107,30 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &App) {
     };
     let lines: Vec<Line> = all_lines.get(start..end).unwrap_or(&[]).to_vec();
     let title = app.current_target_title();
-    let paragraph = Paragraph::new(lines)
+    let mut all_content = header_lines;
+    all_content.extend(lines);
+    let paragraph = Paragraph::new(all_content)
         .block(Block::default().borders(Borders::ALL).title(format!(" {} ", title)))
         .wrap(Wrap { trim: true })
         .style(Style::default());
     f.render_widget(paragraph, area);
 }
 
-fn format_message_line(m: &MessageLine) -> Line<'_> {
+fn format_message_line<'a>(m: &'a MessageLine, current_nick: Option<&str>) -> Line<'a> {
+    let mention = current_nick.map_or(false, |nick| {
+        !nick.is_empty() && m.text.to_lowercase().contains(&nick.to_lowercase())
+    });
     let (prefix, style) = match m.kind {
-        MessageKind::Privmsg => (format!("<{}> ", m.source), Style::default()),
+        MessageKind::Privmsg => (
+            format!("<{}> ", m.source),
+            if mention {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            },
+        ),
         MessageKind::Notice => (format!("[{}] ", m.source), Style::default().add_modifier(Modifier::ITALIC)),
+        MessageKind::Action => (format!("* {} ", m.source), Style::default().fg(Color::Magenta)),
         MessageKind::Join => (format!("*** {} ", m.source), Style::default().fg(Color::Cyan)),
         MessageKind::Part | MessageKind::Quit => (format!("*** {} ", m.source), Style::default().fg(Color::Yellow)),
         MessageKind::Nick => (format!("*** {} ", m.source), Style::default().fg(Color::Magenta)),
@@ -130,11 +161,19 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
         Mode::Insert => (" INSERT ", Style::default().fg(Color::Black).bg(Color::Green)),
         Mode::Command => (" COMMAND ", Style::default().fg(Color::Black).bg(Color::Rgb(255, 165, 0))),
     };
-    let right = format!(
-        "{} | {}",
-        app.current_server.as_deref().unwrap_or(""),
-        app.current_channel.as_deref().unwrap_or("*")
-    );
+    let target = app.current_channel.as_deref().unwrap_or("*");
+    let right = match app.mode {
+        Mode::Insert => format!(
+            "{} | Sending to: {}",
+            app.current_server.as_deref().unwrap_or(""),
+            target
+        ),
+        _ => format!(
+            "{} | {}",
+            app.current_server.as_deref().unwrap_or(""),
+            target
+        ),
+    };
     let line = Line::from(vec![
         Span::styled(mode_label, mode_style),
         Span::raw(" "),

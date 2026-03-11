@@ -11,8 +11,14 @@ pub enum CommandResult {
     List,
     Servers,
     Connect(String),
+    Reconnect,
     Quit(()),
     Msg { nick: String, text: String },
+    Me(String), // ACTION to current target
+    Nick(String),
+    Topic(Option<String>), // None = request, Some = set
+    Kick { channel: Option<String>, nick: String, reason: Option<String> },
+    Ban { channel: Option<String>, mask: String },
     SwitchChannel(String),
     UserAction { nick: String, action: UserAction },
     StatusMessage(String),
@@ -61,8 +67,61 @@ pub fn parse(line: &str) -> CommandResult {
                 CommandResult::Connect(name)
             }
         }
+        "reconnect" => CommandResult::Reconnect,
         "quit" | "exit" => CommandResult::Quit(()),
         "q" if rest.trim().is_empty() => CommandResult::Quit(()),
+        "me" => {
+            if rest.is_empty() {
+                CommandResult::StatusMessage("Usage: :me <action text>".to_string())
+            } else {
+                CommandResult::Me(rest.to_string())
+            }
+        }
+        "nick" => {
+            let new_nick = rest.split_whitespace().next().unwrap_or("").to_string();
+            if new_nick.is_empty() {
+                CommandResult::StatusMessage("Usage: :nick <newnick>".to_string())
+            } else {
+                CommandResult::Nick(new_nick)
+            }
+        }
+        "topic" => {
+            let topic = rest.trim();
+            if topic.is_empty() {
+                CommandResult::Topic(None)
+            } else {
+                CommandResult::Topic(Some(topic.to_string()))
+            }
+        }
+        "kick" => {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if parts.is_empty() {
+                CommandResult::StatusMessage("Usage: :kick <nick> [reason] or :kick #channel nick [reason]".to_string())
+            } else if parts.len() == 1 {
+                CommandResult::Kick { channel: None, nick: parts[0].to_string(), reason: None }
+            } else if parts[0].starts_with('#') || parts[0].starts_with('&') {
+                let channel = Some(parts[0].to_string());
+                let nick = parts.get(1).unwrap_or(&"").to_string();
+                let reason = parts.get(2).map(|s| s.to_string());
+                CommandResult::Kick { channel, nick, reason }
+            } else {
+                let nick = parts[0].to_string();
+                let reason = parts.get(1).map(|s| s.to_string());
+                CommandResult::Kick { channel: None, nick, reason }
+            }
+        }
+        "ban" => {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if parts.is_empty() {
+                CommandResult::StatusMessage("Usage: :ban <mask> or :ban #channel <mask>".to_string())
+            } else if parts[0].starts_with('#') || parts[0].starts_with('&') {
+                let channel = Some(parts[0].to_string());
+                let mask = parts.get(1).unwrap_or(&"").to_string();
+                CommandResult::Ban { channel, mask }
+            } else {
+                CommandResult::Ban { channel: None, mask: parts[0].to_string() }
+            }
+        }
         "msg" | "message" | "query" => {
             let mut parts = rest.splitn(2, char::is_whitespace);
             let nick = parts.next().unwrap_or("").to_string();

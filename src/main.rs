@@ -7,12 +7,13 @@ mod connection;
 mod events;
 mod ui;
 
-use app::{App, Mode, PanelFocus, UserAction};
+use app::{App, MessageKind, MessageLine, Mode, PanelFocus, UserAction};
 use config::RvConfig;
 use connection::{connect, run_stream, IrcMessage, IrcMessageTx};
 use events::{handle_key, KeyAction};
 use irc::client::prelude::*;
 use irc::proto::Command as IrcCommand;
+use irc::proto::{ChannelMode as IrcChannelMode, Mode as IrcMode};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io;
@@ -70,6 +71,39 @@ fn main() -> Result<(), String> {
 
         // Drain IRC messages (non-blocking)
         while let Ok(msg) = irc_rx.try_recv() {
+            use connection::IrcMessage as M;
+            match &msg {
+                M::CtcpRequest { from_nick, tag, data, .. } => {
+                    if let Some(ref c) = client {
+                        let reply = match tag.as_str() {
+                            "VERSION" => "VERSION rvIRC 0.1".to_string(),
+                            "PING" => data.clone(),
+                            "TIME" => {
+                                let secs = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_secs();
+                                format!("TIME {}", secs)
+                            }
+                            _ => String::new(),
+                        };
+                        if !reply.is_empty() {
+                            let _ = c.send_notice(from_nick, format!("\x01{} {}\x01", tag, reply));
+                        }
+                    }
+                }
+                M::NickInUse => {
+                    if let Some(ref c) = client {
+                        if let Some(ref alt) = config.alt_nick {
+                            let _ = c.send(IrcCommand::NICK(alt.clone()));
+                            app.status_message = format!("Nick in use, trying {}...", alt);
+                        } else {
+                            app.status_message = "Nickname in use.".to_string();
+                        }
+                    }
+                }
+                _ => {}
+            }
             apply_irc_message(&mut app, msg);
         }
 
@@ -84,6 +118,7 @@ fn main() -> Result<(), String> {
                         let channels = server.auto_join_channels();
                         for ch in &channels {
                             let _ = c.send_join(ch);
+                            let _ = c.send_topic(ch, "");
                             if !app.channel_list.contains(ch) {
                                 app.channel_list.push(ch.clone());
                             }
@@ -175,6 +210,17 @@ fn apply_irc_message(app: &mut App, msg: IrcMessage) {
             app.whois_lines = lines;
             app.whois_popup_visible = true;
         }
+        M::Topic { channel, topic } => {
+            app.channel_topics.insert(channel.clone(), topic.unwrap_or_default());
+        }
+        M::ChannelModes { channel, modes } => {
+            app.channel_modes.insert(channel, modes);
+        }
+        M::Invite { nick, channel } => {
+            app.last_invite = Some((nick.clone(), channel.clone()));
+            app.status_message = format!("{} invited you to {} (use :join {} to join)", nick, channel, channel);
+        }
+        M::NickInUse | M::CtcpRequest { .. } => {}
         M::Connected { server } => {
             app.current_server = Some(server);
             app.status_message = "Connected.".to_string();
@@ -197,6 +243,9 @@ fn apply_irc_message(app: &mut App, msg: IrcMessage) {
             app.whois_lines.clear();
             app.pending_auto_join = false;
             app.auto_join_after = None;
+            app.channel_topics.clear();
+            app.channel_modes.clear();
+            app.last_invite = None;
             app.status_message = "Disconnected.".to_string();
         }
     }
@@ -303,9 +352,42 @@ fn handle_key_action(
                             app.status_message = "Not connected.".to_string();
                         }
                     }
-                    UserAction::Kick | UserAction::Ban | UserAction::Mute => {
-                        app.status_message = format!("{:?} {} - not implemented yet", action, nick);
+                    UserAction::Kick => {
                         app.user_action_menu = false;
+                        if let Some(ref ch) = app.current_channel.as_ref() {
+                            if (ch.starts_with('#') || ch.starts_with('&')) && client.as_ref().is_some() {
+                                if let Some(ref c) = client {
+                                    let _ = c.send_kick(ch, &nick, "");
+                                    app.status_message = format!("Kicked {} from {}", nick, ch);
+                                }
+                            } else {
+                                app.status_message = "Not a channel.".to_string();
+                            }
+                        } else {
+                            app.status_message = "No channel.".to_string();
+                        }
+                    }
+                    UserAction::Ban => {
+                        app.user_action_menu = false;
+                        if let Some(ref ch) = app.current_channel.as_ref() {
+                            if (ch.starts_with('#') || ch.starts_with('&')) && client.as_ref().is_some() {
+                                if let Some(ref c) = client {
+                                    let mask = format!("{}!*@*", nick);
+                                    let _ = c.send_mode(ch, &[IrcMode::Plus(IrcChannelMode::Ban, Some(mask))]);
+                                    app.status_message = format!("Ban set on {} for {}", ch, nick);
+                                }
+                            } else {
+                                app.status_message = "Not a channel.".to_string();
+                            }
+                        } else {
+                            app.status_message = "No channel.".to_string();
+                        }
+                    }
+                    UserAction::Mute => {
+                        app.user_action_menu = false;
+                        let key = app.current_channel.as_deref().unwrap_or("*").to_string();
+                        app.muted_nicks.entry(key).or_default().insert(nick.clone());
+                        app.status_message = format!("Muted {} (local)", nick);
                     }
                 }
             }
@@ -327,6 +409,7 @@ fn handle_key_action(
                 app.channel_list_scroll_mode = false;
                 if let Some(ref c) = client {
                     c.send_join(&ch).map_err(|e| e.to_string())?;
+                    let _ = c.send_topic(&ch, "");
                     if !app.channel_list.contains(&ch) {
                         app.channel_list.push(ch.clone());
                     }
@@ -441,9 +524,46 @@ fn handle_key_action(
                 }
             }
         }
+        InputHistoryUp => {
+            if app.mode == Mode::Insert || app.mode == Mode::Command {
+                if app.input_history_index == 0 {
+                    app.input_draft = app.input.clone();
+                }
+                if app.input_history_index < app.input_history.len() {
+                    app.input_history_index += 1;
+                    let idx = app.input_history_index - 1;
+                    app.input = app.input_history[idx].clone();
+                    app.input_cursor = app.input.len();
+                }
+            }
+        }
+        InputHistoryDown => {
+            if (app.mode == Mode::Insert || app.mode == Mode::Command) && app.input_history_index > 0 {
+                app.input_history_index -= 1;
+                if app.input_history_index == 0 {
+                    app.input = app.input_draft.clone();
+                } else {
+                    app.input = app.input_history[app.input_history_index - 1].clone();
+                }
+                app.input_cursor = app.input.len();
+            }
+        }
+        TabComplete => {
+            if app.mode == Mode::Insert || app.mode == Mode::Command {
+                complete_input(app);
+            }
+        }
         Enter => {
             if app.mode == Mode::Insert {
                 let text = app.input.clone();
+                app.input_history_index = 0;
+                app.input_draft.clear();
+                if !text.is_empty() && app.input_history.first().as_deref() != Some(&text) {
+                    app.input_history.insert(0, text.clone());
+                    if app.input_history.len() > 100 {
+                        app.input_history.pop();
+                    }
+                }
                 app.input.clear();
                 app.input_cursor = 0;
                 if text.starts_with(':') {
@@ -456,12 +576,22 @@ fn handle_key_action(
                         app.status_message = "Cannot send to server.".to_string();
                     } else if !text.is_empty() {
                         c.send_privmsg(&target, &text).map_err(|e| e.to_string())?;
+                        let nick = app.current_nickname.clone().unwrap_or_else(|| "?".to_string());
+                        app.push_message(&target, MessageLine { source: nick, text, kind: MessageKind::Privmsg });
                     }
                 } else {
                     app.status_message = "Not connected.".to_string();
                 }
             } else if app.mode == Mode::Command {
                 let line = app.input.clone();
+                app.input_history_index = 0;
+                app.input_draft.clear();
+                if !line.is_empty() && app.input_history.first().as_deref() != Some(&line) {
+                    app.input_history.insert(0, line.clone());
+                    if app.input_history.len() > 100 {
+                        app.input_history.pop();
+                    }
+                }
                 app.input.clear();
                 app.mode = Mode::Normal;
                 if run_command(app, client, stream_handle, config, irc_tx, rt, &line)? {
@@ -497,6 +627,7 @@ fn run_command(
         R::Join(ch) => {
             if let Some(ref c) = client {
                 c.send_join(&ch).map_err(|e| e.to_string())?;
+                let _ = c.send_topic(&ch, "");
                 app.channel_list.push(ch.clone());
                 app.current_channel = Some(ch.clone());
                 app.sync_channel_index_to_current();
@@ -544,6 +675,42 @@ fn run_command(
             app.server_list_popup_visible = true;
             app.server_list_selected_index = 0;
             app.clamp_server_list_selected_index();
+        }
+        R::Reconnect => {
+            if let Some(ref server_name) = app.current_server {
+                if let Some(server) = config.server_by_name(server_name) {
+                    if let Some(h) = stream_handle.take() {
+                        h.abort();
+                    }
+                    drop(client.take());
+                    match connect(server, config, irc_tx.clone(), rt) {
+                        Ok((c, stream)) => {
+                            let tx = irc_tx.clone();
+                            let handle = rt.spawn(async move { run_stream(stream, tx).await });
+                            *stream_handle = Some(handle);
+                            *client = Some(c);
+                            app.current_nickname = config.nickname.clone();
+                            app.current_channel = Some("*server*".to_string());
+                            app.channel_index = 0;
+                            if let Some(ref pw) = server.identify_password {
+                                if let Some(ref c) = client {
+                                    let _ = c.send_privmsg("NickServ", &format!("IDENTIFY {}", pw));
+                                    app.status_message = "Identifying with NickServ...".to_string();
+                                }
+                                app.auto_join_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+                            } else {
+                                app.auto_join_after = None;
+                            }
+                            app.status_message = format!("Reconnected to {}.", server_name);
+                        }
+                        Err(e) => app.status_message = e,
+                    }
+                } else {
+                    app.status_message = "Unknown server.".to_string();
+                }
+            } else {
+                app.status_message = "Not connected.".to_string();
+            }
         }
         R::Connect(name) => {
             match config.server_by_name(&name) {
@@ -609,6 +776,75 @@ fn run_command(
                 app.status_message = format!("Message sent to {}", nick);
             }
         }
+        R::Me(text) => {
+            if let (Some(ref c), Some(ref target)) = (client.as_ref(), app.current_channel.as_ref()) {
+                if target.as_str() == "*server*" {
+                    app.status_message = "Cannot /me to server.".to_string();
+                } else if !text.is_empty() {
+                    c.send_action(target, &text).map_err(|e| e.to_string())?;
+                }
+            } else {
+                app.status_message = "Not connected.".to_string();
+            }
+        }
+        R::Nick(newnick) => {
+            if let Some(ref c) = client {
+                let _ = c.send(IrcCommand::NICK(newnick.clone()));
+                app.current_nickname = Some(newnick.clone());
+                app.status_message = format!("Changing nick to {}", newnick);
+            } else {
+                app.status_message = "Not connected.".to_string();
+            }
+        }
+        R::Topic(Some(topic)) => {
+            if let (Some(ref c), Some(ref ch)) = (client.as_ref(), app.current_channel.as_ref()) {
+                if ch.starts_with('#') || ch.starts_with('&') {
+                    c.send_topic(ch, &topic).map_err(|e| e.to_string())?;
+                    app.channel_topics.insert(ch.to_string(), topic.clone());
+                    app.status_message = "Topic set.".to_string();
+                } else {
+                    app.status_message = "Not a channel.".to_string();
+                }
+            } else {
+                app.status_message = "Not connected.".to_string();
+            }
+        }
+        R::Topic(None) => {
+            if let Some(ref ch) = app.current_channel.as_ref() {
+                if ch.starts_with('#') || ch.starts_with('&') {
+                    if let Some(ref c) = client {
+                        let _ = c.send_topic(ch, "");
+                    }
+                    if let Some(t) = app.channel_topics.get(ch.as_str()) {
+                        app.status_message = if t.is_empty() { "No topic set.".to_string() } else { t.clone() };
+                    } else {
+                        app.status_message = "Requesting topic...".to_string();
+                    }
+                }
+            }
+        }
+        R::Kick { channel, nick, reason } => {
+            let ch = channel.or_else(|| app.current_channel.clone()).filter(|c| c.starts_with('#') || c.starts_with('&'));
+            if let (Some(ref c), Some(ch)) = (client.as_ref(), ch) {
+                c.send_kick(&ch, &nick, reason.as_deref().unwrap_or("")).map_err(|e| e.to_string())?;
+                app.status_message = format!("Kicked {} from {}", nick, ch);
+            } else {
+                app.status_message = "Usage: :kick [channel] <nick> [reason]".to_string();
+            }
+        }
+        R::Ban { channel, mask } => {
+            let ch = channel.or_else(|| app.current_channel.clone()).filter(|c| c.starts_with('#') || c.starts_with('&'));
+            if let (Some(ref c), Some(ch)) = (client.as_ref(), ch) {
+                if mask.is_empty() {
+                    app.status_message = "Usage: :ban [channel] <mask>".to_string();
+                } else {
+                    c.send_mode(&ch, &[IrcMode::Plus(IrcChannelMode::Ban, Some(mask))]).map_err(|e| e.to_string())?;
+                    app.status_message = format!("Ban set on {}", ch);
+                }
+            } else {
+                app.status_message = "Usage: :ban [channel] <mask>".to_string();
+            }
+        }
         R::SwitchChannel(ch) => {
             app.current_channel = Some(ch);
             app.sync_channel_index_to_current();
@@ -650,6 +886,71 @@ fn run_command(
         R::UserAction { .. } => {}
     }
     Ok(false)
+}
+
+/// Tab completion: commands (after :) or nicks (in message).
+fn complete_input(app: &mut App) {
+    const COMMANDS: &[&str] = &[
+        "join", "part", "list", "servers", "connect", "reconnect", "quit", "q",
+        "msg", "me", "nick", "topic", "kick", "ban", "channel", "chan", "c",
+        "channel-panel", "user-panel", "channels", "users",
+    ];
+    let input = &app.input;
+    let cursor = app.input_cursor.min(input.len());
+    let (prefix, word_start) = if input.starts_with(':') {
+        let rest = &input[1..];
+        let first_space = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let first_word = rest[..first_space].to_lowercase();
+        if cursor <= 1 + first_space {
+            let partial = first_word.as_str();
+            let candidates: Vec<&str> = COMMANDS.iter().filter(|c| c.starts_with(partial)).copied().collect();
+            if candidates.len() == 1 {
+                app.input = format!(":{} ", candidates[0]);
+                app.input_cursor = app.input.len();
+            } else if candidates.len() > 1 {
+                let common = common_prefix(candidates.iter().copied());
+                if common != partial {
+                    app.input = format!(":{}", common);
+                    app.input_cursor = app.input.len();
+                }
+            }
+            return;
+        }
+        let from = 1 + first_space + rest[first_space..].trim_start().len();
+        let to = cursor;
+        (&input[..from], input[from..to].to_string())
+    } else {
+        let last_space = input[..cursor].rfind(char::is_whitespace).map(|i| i + 1).unwrap_or(0);
+        (&input[..last_space], input[last_space..cursor].to_string())
+    };
+    let partial = word_start.to_lowercase();
+    let nicks: Vec<String> = app.user_list.iter().map(|u| App::strip_user_prefix(u).to_string()).collect();
+    let candidates: Vec<String> = nicks.into_iter().filter(|n| n.to_lowercase().starts_with(partial.as_str())).collect();
+    if candidates.len() == 1 {
+        app.input = format!("{}{}", prefix, candidates[0]);
+        app.input_cursor = app.input.len();
+    } else if candidates.len() > 1 {
+        let common = common_prefix(candidates.iter().map(String::as_str));
+        if common != partial {
+            app.input = format!("{}{}", prefix, common);
+            app.input_cursor = app.input.len();
+        }
+    }
+}
+
+fn common_prefix(mut it: impl Iterator<Item = impl AsRef<str>>) -> String {
+    let first = match it.next() {
+        Some(s) => s.as_ref().to_string(),
+        None => return String::new(),
+    };
+    let mut prefix = first;
+    for s in it {
+        let s = s.as_ref();
+        while !prefix.is_empty() && !s.starts_with(&prefix) {
+            prefix.pop();
+        }
+    }
+    prefix
 }
 
 /// Request NAMES for the current channel so the user list is populated.

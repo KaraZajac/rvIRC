@@ -21,6 +21,7 @@ pub struct MessageLine {
 pub enum MessageKind {
     Privmsg,
     Notice,
+    Action, // /me
     Join,
     Part,
     Quit,
@@ -96,6 +97,20 @@ pub struct App {
     /// When set, auto_join runs only after this time (identify first, then join channels).
     pub auto_join_after: Option<Instant>,
 
+    /// Channel topic (per target). Empty = no topic.
+    pub channel_topics: HashMap<String, String>,
+    /// Channel modes (per channel). e.g. "+nt"
+    pub channel_modes: HashMap<String, String>,
+    /// Last invite: "nick invited you to #channel" for status/join.
+    pub last_invite: Option<(String, String)>,
+    /// Muted nicks per channel (local ignore). Key = channel or "*" for global, value = set of nicks.
+    pub muted_nicks: HashMap<String, std::collections::HashSet<String>>,
+
+    /// Input history (newest first). Capped at 100.
+    pub input_history: Vec<String>,
+    pub input_history_index: usize, // 0 = not browsing; when > 0 we show history[index - 1]
+    pub input_draft: String,        // saved when browsing history, restored when Down to 0
+
     pub status_message: String,
 }
 
@@ -133,6 +148,13 @@ impl App {
             message_scroll_offset: 0,
             pending_auto_join: false,
             auto_join_after: None,
+            channel_topics: HashMap::new(),
+            channel_modes: HashMap::new(),
+            last_invite: None,
+            muted_nicks: HashMap::new(),
+            input_history: Vec::new(),
+            input_history_index: 0,
+            input_draft: String::new(),
             status_message: String::new(),
         }
     }
@@ -208,6 +230,37 @@ impl App {
             .get(key)
             .map(|v| v.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// Whether to hide messages from this nick in the given target (mute list).
+    pub fn is_muted(&self, target: &str, nick: &str) -> bool {
+        self.muted_nicks
+            .get(target)
+            .map(|s| s.contains(nick))
+            .unwrap_or(false)
+            || self
+                .muted_nicks
+                .get("*")
+                .map(|s| s.contains(nick))
+                .unwrap_or(false)
+    }
+
+    pub fn current_topic(&self) -> Option<&str> {
+        let key = self.current_channel.as_deref()?;
+        if key.starts_with('#') || key.starts_with('&') {
+            self.channel_topics.get(key).map(|s| s.as_str()).filter(|s| !s.is_empty())
+        } else {
+            None
+        }
+    }
+
+    pub fn current_modes(&self) -> Option<&str> {
+        let key = self.current_channel.as_deref()?;
+        if key.starts_with('#') || key.starts_with('&') {
+            self.channel_modes.get(key).map(|s| s.as_str()).filter(|s| !s.is_empty())
+        } else {
+            None
+        }
     }
 
     pub fn push_message(&mut self, target: &str, line: MessageLine) {
