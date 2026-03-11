@@ -148,8 +148,19 @@ fn draw_input_bar(f: &mut Frame, area: Rect, app: &App) {
         Mode::Command => ":",
         _ => "",
     };
-    let content = format!("{}{}", prompt, app.input);
-    let paragraph = Paragraph::new(content)
+    let show_cursor = app.mode == Mode::Insert || app.mode == Mode::Command;
+    let line = if show_cursor {
+        let before = format!("{}{}", prompt, &app.input[..app.input_cursor.min(app.input.len())]);
+        let after = app.input.get(app.input_cursor..).unwrap_or("");
+        Line::from(vec![
+            Span::raw(before),
+            Span::styled("▌", Style::default().add_modifier(Modifier::REVERSED)),
+            Span::raw(after),
+        ])
+    } else {
+        Line::from(format!("{}{}", prompt, app.input))
+    };
+    let paragraph = Paragraph::new(line)
         .block(Block::default().borders(Borders::ALL).title(" Input "))
         .style(Style::default());
     f.render_widget(paragraph, area);
