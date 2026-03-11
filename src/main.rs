@@ -857,6 +857,8 @@ fn run_command(
             if let Some(ref c) = client {
                 if !text.is_empty() {
                     c.send_privmsg(&nick, &text).map_err(|e| e.to_string())?;
+                    let our_nick = app.current_nickname.clone().unwrap_or_else(|| "?".to_string());
+                    app.push_message(&nick, MessageLine { source: our_nick, text: text.clone(), kind: MessageKind::Privmsg });
                 }
                 if !app.dm_targets.contains(&nick) {
                     app.dm_targets.push(nick.clone());
