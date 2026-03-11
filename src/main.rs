@@ -35,7 +35,7 @@ fn main() -> Result<(), String> {
     let mut auto_connect_attempted = false;
 
     loop {
-        terminal.draw(|f| ui::draw(f, &app)).map_err(|e| e.to_string())?;
+        terminal.draw(|f| ui::draw(f, &mut app)).map_err(|e| e.to_string())?;
 
         // Auto-connect once on startup if a server has auto_connect = "yes"
         if !auto_connect_attempted && client.is_none() {
@@ -511,16 +511,18 @@ fn handle_key_action(
             app.license_popup_scroll_offset = 0;
         }
         LicenseScrollUp => {
-            app.license_popup_scroll_offset = app.license_popup_scroll_offset.saturating_add(1);
-        }
-        LicenseScrollDown => {
+            // Up/k = see higher in document = decrease offset
             app.license_popup_scroll_offset = app.license_popup_scroll_offset.saturating_sub(1);
         }
+        LicenseScrollDown => {
+            // Down/j = see lower in document = increase offset (ratatui: higher y = further down)
+            app.license_popup_scroll_offset = app.license_popup_scroll_offset.saturating_add(1);
+        }
         LicenseScrollPageUp => {
-            app.license_popup_scroll_offset = app.license_popup_scroll_offset.saturating_add(15);
+            app.license_popup_scroll_offset = app.license_popup_scroll_offset.saturating_sub(15);
         }
         LicenseScrollPageDown => {
-            app.license_popup_scroll_offset = app.license_popup_scroll_offset.saturating_sub(15);
+            app.license_popup_scroll_offset = app.license_popup_scroll_offset.saturating_add(15);
         }
         ServerListPopupClose => {
             app.server_list_popup_visible = false;

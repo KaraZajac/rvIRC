@@ -38,7 +38,7 @@ fn popup_overlay_style() -> Style {
     Style::default()
 }
 
-pub fn draw(f: &mut Frame, app: &App) {
+pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     // Input height grows with wrapped lines (1–10 content lines + 2 borders), resets when message is sent
     let input_inner_width = area.width.saturating_sub(2);
@@ -542,7 +542,18 @@ fn draw_credits_popup(f: &mut Frame, area: Rect) {
     f.render_widget(hint, chunks[1]);
 }
 
-fn draw_license_popup(f: &mut Frame, area: Rect, app: &App) {
+fn license_wrapped_line_count(inner_width: u16) -> usize {
+    let w = inner_width as usize;
+    if w == 0 {
+        return 1;
+    }
+    LICENSE_TEXT
+        .lines()
+        .map(|line| ((line.width() + w - 1) / w).max(1))
+        .sum()
+}
+
+fn draw_license_popup(f: &mut Frame, area: Rect, app: &mut App) {
     let popup_width = (area.width * 3 / 4).min(72).max(50);
     let popup_height = (area.height * 3 / 4).min(28).max(14);
     let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
@@ -559,6 +570,13 @@ fn draw_license_popup(f: &mut Frame, area: Rect, app: &App) {
         .margin(1)
         .split(popup_rect);
 
+    let content_area = chunks[0];
+    let inner_width = content_area.width;
+    let visible_height = content_area.height as usize;
+    let total_lines = license_wrapped_line_count(inner_width);
+    let max_offset = total_lines.saturating_sub(visible_height).max(0);
+    app.license_popup_scroll_offset = app.license_popup_scroll_offset.min(max_offset);
+
     f.render_widget(Clear, popup_rect);
     let popup_style = popup_overlay_style();
     let block = Block::default()
@@ -572,7 +590,7 @@ fn draw_license_popup(f: &mut Frame, area: Rect, app: &App) {
         .style(popup_style)
         .wrap(Wrap { trim: true })
         .scroll(scroll);
-    f.render_widget(para, chunks[0]);
+    f.render_widget(para, content_area);
 
     let hint = Paragraph::new("j/k or arrows: scroll | Esc / Enter / q: close")
         .style(popup_style.add_modifier(Modifier::DIM));
