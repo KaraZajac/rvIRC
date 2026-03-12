@@ -33,6 +33,8 @@ pub enum CommandResult {
     License,
     Secure(String),
     Unsecure(String),
+    Verify(String),
+    Verified(String),
     SendFile { nick: String, path: String },
     NoOp,
     Unknown(String),
@@ -178,6 +180,14 @@ pub fn parse(line: &str) -> CommandResult {
         "unsecure" => {
             let nick = rest.split_whitespace().next().unwrap_or("").to_string();
             CommandResult::Unsecure(nick)
+        }
+        "verify" => {
+            let nick = rest.split_whitespace().next().unwrap_or("").to_string();
+            CommandResult::Verify(nick)
+        }
+        "verified" => {
+            let nick = rest.split_whitespace().next().unwrap_or("").to_string();
+            CommandResult::Verified(nick)
         }
         "sendfile" => {
             let mut parts = rest.splitn(2, char::is_whitespace);

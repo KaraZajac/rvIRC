@@ -15,8 +15,15 @@ pub struct RvConfig {
     /// Default directory for received file transfers. Expands ~ to home dir.
     #[serde(default)]
     pub download_dir: Option<String>,
+    /// Whether to fetch and display inline images for image URLs (default: true).
+    #[serde(default = "default_render_images")]
+    pub render_images: bool,
     #[serde(default)]
     pub servers: Vec<ServerEntry>,
+}
+
+fn default_render_images() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +131,7 @@ impl RvConfig {
             alt_nick: None,
             real_name: Some("rvIRC User".to_string()),
             download_dir: None,
+            render_images: true,
             servers: vec![
                 ServerEntry {
                     name: "Libera".to_string(),

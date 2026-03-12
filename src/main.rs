@@ -12,7 +12,8 @@ mod ui;
 use app::{App, MessageKind, MessageLine, Mode, PanelFocus, UserAction};
 use config::RvConfig;
 use connection::{connect, run_stream, IrcMessage, IrcMessageTx};
-use crypto::SecureSession;
+use crypto::{KnownKeys, SecureSession, TofuResult, key_fingerprint};
+use base64::Engine;
 use events::{handle_key, KeyAction};
 use irc::client::prelude::*;
 use irc::proto::Command as IrcCommand;
@@ -30,7 +31,20 @@ fn main() -> Result<(), String> {
     let (irc_tx, mut irc_rx) = mpsc::unbounded_channel::<IrcMessage>();
 
     let mut app = App::new();
+    app.render_images = config.render_images;
     app.status_message = "Type :connect <server> to connect. :join #channel to join.".to_string();
+
+    // Load persistent identity keypair (same directory as config.toml)
+    if let Some(config_dir) = RvConfig::config_dir() {
+        let identity_path = config_dir.join("identity.toml");
+        match crypto::Keypair::load_or_generate(&identity_path) {
+            Ok(kp) => app.keypair = kp,
+            Err(e) => app.status_message = format!("Identity key error: {}", e),
+        }
+        let known_keys_path = config_dir.join("known_keys.toml");
+        app.known_keys = KnownKeys::load(&known_keys_path);
+        app.known_keys_path = Some(known_keys_path);
+    }
 
     let mut client: Option<Client> = None;
     let mut stream_handle: Option<tokio::task::JoinHandle<()>> = None;
@@ -230,7 +244,7 @@ fn main() -> Result<(), String> {
         let key_action = if let Ok(true) = event {
             crossterm::event::read()
                 .ok()
-                .and_then(|ev| handle_key(ev, app.mode, app.panel_focus, app.channel_panel_visible, app.user_panel_visible, app.user_action_menu, app.channel_list_popup_visible, app.channel_list_scroll_mode, app.server_list_popup_visible, app.whois_popup_visible, app.credits_popup_visible, app.license_popup_visible, app.file_receive_popup_visible, app.file_browser_visible))
+                .and_then(|ev| handle_key(ev, app.mode, app.panel_focus, app.channel_panel_visible, app.user_panel_visible, app.user_action_menu, app.channel_list_popup_visible, app.channel_list_scroll_mode, app.server_list_popup_visible, app.whois_popup_visible, app.credits_popup_visible, app.license_popup_visible, app.file_receive_popup_visible, app.file_browser_visible, app.secure_accept_popup_visible))
         } else {
             None
         };
@@ -252,6 +266,15 @@ fn main() -> Result<(), String> {
                 break;
             }
         }
+    }
+
+    // Clean disconnect so the server and other users see a proper QUIT (not just connection closed)
+    if let Some(c) = client.take() {
+        let _ = c.send_quit("Leaving");
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    if let Some(h) = stream_handle.take() {
+        h.abort();
     }
 
     restore_terminal().map_err(|e| e.to_string())?;
@@ -276,40 +299,42 @@ fn apply_irc_message(
                 }
                 return;
             }
-            if let Some(url) = extract_image_url(&line.text) {
-                let image_id = app.next_image_id;
-                app.next_image_id += 1;
-                line.image_id = Some(image_id);
-                let url = url.to_string();
-                let tx = irc_tx.clone();
-                rt.spawn(async move {
-                    let result = tokio::task::spawn_blocking(move || {
-                        let resp = ureq::get(&url).call().map_err(|e| format!("{}", e))?;
-                        let len = resp
-                            .header("content-length")
-                            .and_then(|s| s.parse::<usize>().ok())
-                            .unwrap_or(0);
-                        if len > 10_000_000 {
-                            return Err("Image too large (>10MB)".to_string());
+            if app.render_images {
+                if let Some(url) = extract_image_url(&line.text) {
+                    let image_id = app.next_image_id;
+                    app.next_image_id += 1;
+                    line.image_id = Some(image_id);
+                    let url = url.to_string();
+                    let tx = irc_tx.clone();
+                    rt.spawn(async move {
+                        let result = tokio::task::spawn_blocking(move || {
+                            let resp = ureq::get(&url).call().map_err(|e| format!("{}", e))?;
+                            let len = resp
+                                .header("content-length")
+                                .and_then(|s| s.parse::<usize>().ok())
+                                .unwrap_or(0);
+                            if len > 10_000_000 {
+                                return Err("Image too large (>10MB)".to_string());
+                            }
+                            let mut bytes = Vec::new();
+                            use std::io::Read;
+                            resp.into_reader()
+                                .take(10_000_000)
+                                .read_to_end(&mut bytes)
+                                .map_err(|e| format!("{}", e))?;
+                            image::load_from_memory(&bytes).map_err(|e| format!("{}", e))
+                        })
+                        .await
+                        .map_err(|e| format!("{}", e))
+                        .and_then(|r| r);
+                        match result {
+                            Ok(img) => {
+                                let _ = tx.send(IrcMessage::ImageReady { image_id, image: img });
+                            }
+                            Err(_e) => {}
                         }
-                        let mut bytes = Vec::new();
-                        use std::io::Read;
-                        resp.into_reader()
-                            .take(10_000_000)
-                            .read_to_end(&mut bytes)
-                            .map_err(|e| format!("{}", e))?;
-                        image::load_from_memory(&bytes).map_err(|e| format!("{}", e))
-                    })
-                    .await
-                    .map_err(|e| format!("{}", e))
-                    .and_then(|r| r);
-                    match result {
-                        Ok(img) => {
-                            let _ = tx.send(IrcMessage::ImageReady { image_id, image: img });
-                        }
-                        Err(_e) => {}
-                    }
-                });
+                    });
+                }
             }
             if target == app.current_nickname.as_deref().unwrap_or("") {
                 app.push_message(&line.source, line.clone());
@@ -789,6 +814,67 @@ fn handle_key_action(
                 }
             }
         }
+        SecureAccept => {
+            let nick = app.secure_accept_nick.clone();
+            let ephemeral_b64 = app.secure_accept_ephemeral_b64.clone();
+            let identity_b64 = app.secure_accept_identity_b64.clone();
+            app.secure_accept_popup_visible = false;
+
+            let their_identity_bytes: [u8; 32] = match base64::engine::general_purpose::STANDARD
+                .decode(&identity_b64)
+                .ok()
+                .and_then(|v| v.try_into().ok())
+            {
+                Some(b) => b,
+                None => {
+                    app.push_chat_log(&nick, "Secure handshake failed: invalid identity key.");
+                    app.status_message = "Secure handshake failed.".to_string();
+                    return Ok(false);
+                }
+            };
+
+            // TOFU: upsert the peer's identity key
+            let server = app.current_server.as_deref().unwrap_or("unknown").to_string();
+            app.known_keys.upsert(&nick, &server, &identity_b64);
+            if let Some(ref path) = app.known_keys_path {
+                let _ = app.known_keys.save(path);
+            }
+
+            let our_ephemeral = crypto::Keypair::generate();
+            let our_ephemeral_pub_b64 = our_ephemeral.public_key_b64();
+            let our_identity_pub_b64 = app.keypair.public_key_b64();
+
+            match SecureSession::from_exchange(
+                &our_ephemeral.secret,
+                &our_ephemeral.public,
+                &ephemeral_b64,
+                &app.keypair.public,
+                their_identity_bytes,
+            ) {
+                Ok(session) => {
+                    app.secure_sessions.insert(nick.clone(), session);
+                    if let Some(ref c) = client {
+                        let msg = format!("[:rvIRC:SECURE:ACK:{}:{}]", our_ephemeral_pub_b64, our_identity_pub_b64);
+                        let _ = c.send_privmsg(&nick, &msg);
+                    }
+                    let fp = key_fingerprint(&identity_b64);
+                    app.push_chat_log(&nick, &format!("Key fingerprint: {}", fp));
+                    app.push_chat_log(&nick, "*** SECURE CONNECTION ESTABLISHED ***");
+                    app.push_chat_log(&nick, "Messages are now end-to-end encrypted (X25519 + ChaCha20-Poly1305).");
+                    app.status_message = format!("Secure session established with {}.", nick);
+                }
+                Err(e) => {
+                    app.push_chat_log(&nick, &format!("Secure handshake failed: {}", e));
+                    app.status_message = format!("Secure handshake from {} failed: {}", nick, e);
+                }
+            }
+        }
+        SecureReject => {
+            let nick = app.secure_accept_nick.clone();
+            app.secure_accept_popup_visible = false;
+            app.push_chat_log(&nick, "*** Secure session request rejected. ***");
+            app.status_message = format!("Rejected secure session from {}.", nick);
+        }
         FileReceiveAccept => {
             let code = app.file_receive_code.clone();
             let filename = app.file_receive_filename.clone();
@@ -1104,7 +1190,8 @@ fn run_command(
         R::Quit(_) => {
             app.clear_reconnect();
             if let Some(ref c) = client {
-                let _ = c.send_quit("");
+                let _ = c.send_quit("Leaving");
+                std::thread::sleep(std::time::Duration::from_millis(250));
             }
             if let Some(h) = stream_handle.take() {
                 h.abort();
@@ -1273,10 +1360,13 @@ fn run_command(
             if nick.is_empty() {
                 app.status_message = "Usage: :secure <nick> (or use in a DM)".to_string();
             } else if let Some(ref c) = client {
-                let our_pub = app.keypair.public_key_b64();
-                let msg = format!("[:rvIRC:SECURE:INIT:{}]", our_pub);
+                let ephemeral = crypto::Keypair::generate();
+                let ephemeral_pub_b64 = ephemeral.public_key_b64();
+                let identity_pub_b64 = app.keypair.public_key_b64();
+                let msg = format!("[:rvIRC:SECURE:INIT:{}:{}]", ephemeral_pub_b64, identity_pub_b64);
                 c.send_privmsg(&nick, &msg).map_err(|e| e.to_string())?;
                 app.pending_secure.insert(nick.clone());
+                app.pending_secure_ephemeral.insert(nick.clone(), ephemeral);
                 if !app.dm_targets.contains(&nick) {
                     app.dm_targets.push(nick.clone());
                 }
@@ -1353,6 +1443,45 @@ fn run_command(
                 }
             }
         }
+        R::Verify(nick_arg) => {
+            let nick = if nick_arg.is_empty() {
+                app.current_dm_nick().unwrap_or_default()
+            } else {
+                nick_arg
+            };
+            if nick.is_empty() {
+                app.status_message = "Usage: :verify <nick> (or use in a DM)".to_string();
+            } else if let Some(session) = app.secure_sessions.get(&nick) {
+                let words = session.sas_words();
+                let code = words.join(" ");
+                app.push_chat_log(&nick, &format!("Verification code with {}: {}", nick, code));
+                app.push_chat_log(&nick, "Compare this code with your peer out-of-band. If it matches, run :verified");
+                app.status_message = format!("SAS: {}", code);
+            } else {
+                app.status_message = format!("No secure session with {}.", nick);
+            }
+        }
+        R::Verified(nick_arg) => {
+            let nick = if nick_arg.is_empty() {
+                app.current_dm_nick().unwrap_or_default()
+            } else {
+                nick_arg
+            };
+            if nick.is_empty() {
+                app.status_message = "Usage: :verified <nick> (or use in a DM)".to_string();
+            } else {
+                let server = app.current_server.as_deref().unwrap_or("unknown");
+                if app.known_keys.set_verified(&nick, server) {
+                    if let Some(ref path) = app.known_keys_path {
+                        let _ = app.known_keys.save(path);
+                    }
+                    app.push_chat_log(&nick, &format!("*** {} is now marked as VERIFIED ***", nick));
+                    app.status_message = format!("{} marked as verified.", nick);
+                } else {
+                    app.status_message = format!("No known key for {}.", nick);
+                }
+            }
+        }
         R::UserAction { .. } => {}
     }
     Ok(false)
@@ -1366,6 +1495,7 @@ fn complete_input(app: &mut App) {
         "channel-panel", "user-panel", "channels", "users",
         "version", "credits", "license",
         "secure", "unsecure", "sendfile",
+        "verify", "verified",
     ];
     let input = &app.input;
     let cursor = app.input_cursor.min(input.len());
@@ -1478,15 +1608,23 @@ fn parse_rvirc_protocol(from_nick: &str, text: &str) -> Option<app::ProtocolEven
     let inner = inner.strip_suffix(']').unwrap_or(inner);
 
     if let Some(rest) = inner.strip_prefix("SECURE:INIT:") {
+        let mut parts = rest.splitn(2, ':');
+        let ephemeral = parts.next()?;
+        let identity = parts.next().unwrap_or("");
         return Some(ProtocolEvent::SecureInit {
             from_nick: from_nick.to_string(),
-            pubkey_b64: rest.to_string(),
+            ephemeral_pub_b64: ephemeral.to_string(),
+            identity_pub_b64: identity.to_string(),
         });
     }
     if let Some(rest) = inner.strip_prefix("SECURE:ACK:") {
+        let mut parts = rest.splitn(2, ':');
+        let ephemeral = parts.next()?;
+        let identity = parts.next().unwrap_or("");
         return Some(ProtocolEvent::SecureAck {
             from_nick: from_nick.to_string(),
-            pubkey_b64: rest.to_string(),
+            ephemeral_pub_b64: ephemeral.to_string(),
+            identity_pub_b64: identity.to_string(),
         });
     }
     if let Some(rest) = inner.strip_prefix("ENC:") {
@@ -1530,7 +1668,7 @@ fn parse_rvirc_protocol(from_nick: &str, text: &str) -> Option<app::ProtocolEven
 /// Process queued protocol events (called from main loop, has access to client).
 fn process_protocol_events(
     app: &mut App,
-    client: &mut Option<Client>,
+    _client: &mut Option<Client>,
     rt: &tokio::runtime::Runtime,
     irc_tx: &IrcMessageTx,
 ) {
@@ -1538,35 +1676,108 @@ fn process_protocol_events(
     let events: Vec<ProtocolEvent> = app.protocol_events.drain(..).collect();
     for evt in events {
         match evt {
-            ProtocolEvent::SecureInit { from_nick, pubkey_b64 } => {
+            ProtocolEvent::SecureInit { from_nick, ephemeral_pub_b64, identity_pub_b64 } => {
+                if !app.dm_targets.contains(&from_nick) {
+                    app.dm_targets.push(from_nick.clone());
+                }
                 app.push_chat_log(&from_nick, &format!("*** {} REQUESTED SECURE CONNECTION ***", from_nick));
-                app.push_chat_log(&from_nick, "Performing key exchange...");
-                match SecureSession::from_exchange(&app.keypair.secret, &pubkey_b64) {
-                    Ok(session) => {
-                        app.secure_sessions.insert(from_nick.clone(), session);
-                        let our_pub = app.keypair.public_key_b64();
-                        if let Some(ref c) = client {
-                            let msg = format!("[:rvIRC:SECURE:ACK:{}]", our_pub);
-                            let _ = c.send_privmsg(&from_nick, &msg);
-                        }
-                        app.push_chat_log(&from_nick, "*** SECURE CONNECTION ESTABLISHED ***");
-                        app.push_chat_log(&from_nick, "Messages are now end-to-end encrypted (X25519 + ChaCha20-Poly1305).");
-                        app.status_message = format!("Secure session established with {}.", from_nick);
+
+                // TOFU check
+                let server = app.current_server.as_deref().unwrap_or("unknown").to_string();
+                let tofu = app.known_keys.check(&from_nick, &server, &identity_pub_b64);
+                let key_changed = matches!(tofu, TofuResult::KeyChanged);
+
+                match &tofu {
+                    TofuResult::FirstContact => {
+                        let fp = key_fingerprint(&identity_pub_b64);
+                        app.push_chat_log(&from_nick, &format!("First contact with {} -- key fingerprint: {}", from_nick, fp));
                     }
-                    Err(e) => {
-                        app.push_chat_log(&from_nick, &format!("Secure handshake failed: {}", e));
-                        app.status_message = format!("Secure handshake from {} failed: {}", from_nick, e);
+                    TofuResult::KeyMatch { verified } => {
+                        if *verified {
+                            app.push_chat_log(&from_nick, &format!("Key matches known VERIFIED identity for {}.", from_nick));
+                        } else {
+                            app.push_chat_log(&from_nick, &format!("Key matches known identity for {}.", from_nick));
+                        }
+                    }
+                    TofuResult::KeyChanged => {
+                        app.push_chat_log(&from_nick, &format!("⚠ WARNING: {}'s identity key has CHANGED since last session!", from_nick));
+                        app.push_chat_log(&from_nick, "This could indicate a man-in-the-middle attack.");
                     }
                 }
+
+                // Show accept/reject popup
+                app.secure_accept_popup_visible = true;
+                app.secure_accept_nick = from_nick;
+                app.secure_accept_ephemeral_b64 = ephemeral_pub_b64;
+                app.secure_accept_identity_b64 = identity_pub_b64;
+                app.secure_accept_key_changed = key_changed;
             }
-            ProtocolEvent::SecureAck { from_nick, pubkey_b64 } => {
+            ProtocolEvent::SecureAck { from_nick, ephemeral_pub_b64, identity_pub_b64 } => {
                 if app.pending_secure.remove(&from_nick) {
                     app.push_chat_log(&from_nick, "Key exchange response received...");
-                    match SecureSession::from_exchange(&app.keypair.secret, &pubkey_b64) {
+
+                    let their_identity_bytes: [u8; 32] = match base64::engine::general_purpose::STANDARD
+                        .decode(&identity_pub_b64)
+                        .ok()
+                        .and_then(|v| v.try_into().ok())
+                    {
+                        Some(b) => b,
+                        None => {
+                            app.push_chat_log(&from_nick, "Secure handshake failed: invalid identity key.");
+                            continue;
+                        }
+                    };
+
+                    // TOFU check
+                    let server = app.current_server.as_deref().unwrap_or("unknown").to_string();
+                    let tofu = app.known_keys.check(&from_nick, &server, &identity_pub_b64);
+                    match &tofu {
+                        TofuResult::FirstContact => {
+                            let fp = key_fingerprint(&identity_pub_b64);
+                            app.push_chat_log(&from_nick, &format!("First contact with {} -- key fingerprint: {}", from_nick, fp));
+                        }
+                        TofuResult::KeyMatch { verified } => {
+                            if *verified {
+                                app.push_chat_log(&from_nick, &format!("Key matches known VERIFIED identity for {}.", from_nick));
+                            } else {
+                                app.push_chat_log(&from_nick, &format!("Key matches known identity for {}.", from_nick));
+                            }
+                        }
+                        TofuResult::KeyChanged => {
+                            app.push_chat_log(&from_nick, &format!("⚠ WARNING: {}'s identity key has CHANGED since last session!", from_nick));
+                            app.push_chat_log(&from_nick, "This could indicate a man-in-the-middle attack. Session aborted.");
+                            app.pending_secure_ephemeral.remove(&from_nick);
+                            continue;
+                        }
+                    }
+
+                    app.known_keys.upsert(&from_nick, &server, &identity_pub_b64);
+                    if let Some(ref path) = app.known_keys_path {
+                        let _ = app.known_keys.save(path);
+                    }
+
+                    let ephemeral = match app.pending_secure_ephemeral.remove(&from_nick) {
+                        Some(kp) => kp,
+                        None => {
+                            app.push_chat_log(&from_nick, "Secure handshake failed: no ephemeral key found.");
+                            continue;
+                        }
+                    };
+
+                    match SecureSession::from_exchange(
+                        &ephemeral.secret,
+                        &ephemeral.public,
+                        &ephemeral_pub_b64,
+                        &app.keypair.public,
+                        their_identity_bytes,
+                    ) {
                         Ok(session) => {
                             app.secure_sessions.insert(from_nick.clone(), session);
+                            let fp = key_fingerprint(&identity_pub_b64);
+                            app.push_chat_log(&from_nick, &format!("Key fingerprint: {}", fp));
                             app.push_chat_log(&from_nick, "*** SECURE CONNECTION ESTABLISHED ***");
                             app.push_chat_log(&from_nick, "Messages are now end-to-end encrypted (X25519 + ChaCha20-Poly1305).");
+                            app.push_chat_log(&from_nick, "Use :verify to compare verification codes.");
                             app.status_message = format!("Secure session established with {}.", from_nick);
                         }
                         Err(e) => {
@@ -1586,40 +1797,42 @@ fn process_protocol_events(
                                 kind: MessageKind::Privmsg,
                                 image_id: None,
                             };
-                            if let Some(url) = extract_image_url(&line.text) {
-                                let image_id = app.next_image_id;
-                                app.next_image_id += 1;
-                                line.image_id = Some(image_id);
-                                let url = url.to_string();
-                                let tx = irc_tx.clone();
-                                rt.spawn(async move {
-                                    let result = tokio::task::spawn_blocking(move || {
-                                        let resp = ureq::get(&url).call().map_err(|e| format!("{}", e))?;
-                                        let len = resp
-                                            .header("content-length")
-                                            .and_then(|s| s.parse::<usize>().ok())
-                                            .unwrap_or(0);
-                                        if len > 10_000_000 {
-                                            return Err("Image too large (>10MB)".to_string());
+                            if app.render_images {
+                                if let Some(url) = extract_image_url(&line.text) {
+                                    let image_id = app.next_image_id;
+                                    app.next_image_id += 1;
+                                    line.image_id = Some(image_id);
+                                    let url = url.to_string();
+                                    let tx = irc_tx.clone();
+                                    rt.spawn(async move {
+                                        let result = tokio::task::spawn_blocking(move || {
+                                            let resp = ureq::get(&url).call().map_err(|e| format!("{}", e))?;
+                                            let len = resp
+                                                .header("content-length")
+                                                .and_then(|s| s.parse::<usize>().ok())
+                                                .unwrap_or(0);
+                                            if len > 10_000_000 {
+                                                return Err("Image too large (>10MB)".to_string());
+                                            }
+                                            let mut bytes = Vec::new();
+                                            use std::io::Read;
+                                            resp.into_reader()
+                                                .take(10_000_000)
+                                                .read_to_end(&mut bytes)
+                                                .map_err(|e| format!("{}", e))?;
+                                            image::load_from_memory(&bytes).map_err(|e| format!("{}", e))
+                                        })
+                                        .await
+                                        .map_err(|e| format!("{}", e))
+                                        .and_then(|r| r);
+                                        match result {
+                                            Ok(img) => {
+                                                let _ = tx.send(IrcMessage::ImageReady { image_id, image: img });
+                                            }
+                                            Err(_e) => {}
                                         }
-                                        let mut bytes = Vec::new();
-                                        use std::io::Read;
-                                        resp.into_reader()
-                                            .take(10_000_000)
-                                            .read_to_end(&mut bytes)
-                                            .map_err(|e| format!("{}", e))?;
-                                        image::load_from_memory(&bytes).map_err(|e| format!("{}", e))
-                                    })
-                                    .await
-                                    .map_err(|e| format!("{}", e))
-                                    .and_then(|r| r);
-                                    match result {
-                                        Ok(img) => {
-                                            let _ = tx.send(IrcMessage::ImageReady { image_id, image: img });
-                                        }
-                                        Err(_e) => {}
-                                    }
-                                });
+                                    });
+                                }
                             }
                             app.push_message(&from_nick, line);
                         }

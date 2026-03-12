@@ -18,6 +18,7 @@ pub fn handle_key(
     license_popup_visible: bool,
     file_receive_popup_visible: bool,
     file_browser_visible: bool,
+    secure_accept_popup_visible: bool,
 ) -> Option<KeyAction> {
     let key = match event {
         Event::Key(k) => k,
@@ -26,6 +27,9 @@ pub fn handle_key(
 
     if file_browser_visible {
         return Some(handle_file_browser(key));
+    }
+    if secure_accept_popup_visible {
+        return Some(handle_secure_accept_popup(key));
     }
     if file_receive_popup_visible {
         return Some(handle_file_receive_popup(key));
@@ -110,6 +114,8 @@ pub enum KeyAction {
     InputHistoryUp,
     InputHistoryDown,
     TabComplete,
+    SecureAccept,
+    SecureReject,
     FileReceiveAccept,
     FileReceiveReject,
     FileBrowserUp,
@@ -230,6 +236,14 @@ fn handle_server_list_popup(key: KeyEvent) -> KeyAction {
         KeyCode::Enter => KeyAction::ServerListPopupSelect,
         KeyCode::Up | KeyCode::Char('k') => KeyAction::ServerListPopupUp,
         KeyCode::Down | KeyCode::Char('j') => KeyAction::ServerListPopupDown,
+        _ => KeyAction::NoOp,
+    }
+}
+
+fn handle_secure_accept_popup(key: KeyEvent) -> KeyAction {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Enter => KeyAction::SecureAccept,
+        KeyCode::Char('n') | KeyCode::Esc => KeyAction::SecureReject,
         _ => KeyAction::NoOp,
     }
 }

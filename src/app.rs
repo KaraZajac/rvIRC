@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use crate::crypto::{Keypair, SecureSession};
+use crate::crypto::{Keypair, KnownKeys, SecureSession};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileBrowserMode {
@@ -17,8 +17,8 @@ pub enum FileBrowserMode {
 /// Protocol events from intercepted [:rvIRC:] messages, queued for main loop processing.
 #[derive(Debug)]
 pub enum ProtocolEvent {
-    SecureInit { from_nick: String, pubkey_b64: String },
-    SecureAck { from_nick: String, pubkey_b64: String },
+    SecureInit { from_nick: String, ephemeral_pub_b64: String, identity_pub_b64: String },
+    SecureAck { from_nick: String, ephemeral_pub_b64: String, identity_pub_b64: String },
     Encrypted { from_nick: String, nonce_b64: String, ciphertext_b64: String },
     WormholeOffer { from_nick: String, code: String, filename: String, size: u64 },
     WormholeComplete { from_nick: String },
@@ -151,14 +151,27 @@ pub struct App {
     pub reconnect_after: Option<Instant>,
     pub reconnect_attempt: u8,
 
-    /// Ephemeral keypair for encrypted DM sessions (generated on startup).
+    /// Persistent identity keypair (loaded from ~/.config/rvIRC/identity.toml).
     pub keypair: Keypair,
     /// Active encrypted sessions keyed by nick (case-sensitive as received from IRC).
     pub secure_sessions: HashMap<String, SecureSession>,
     /// Nicks where we sent a SECURE:INIT and are waiting for ACK.
     pub pending_secure: HashSet<String>,
+    /// Ephemeral keypairs generated per :secure initiation, keyed by nick.
+    pub pending_secure_ephemeral: HashMap<String, Keypair>,
+    /// TOFU known keys store.
+    pub known_keys: KnownKeys,
+    /// Path to known_keys.toml for saving.
+    pub known_keys_path: Option<PathBuf>,
     /// Queued protocol events from intercepted [:rvIRC:] messages.
     pub protocol_events: Vec<ProtocolEvent>,
+
+    /// Secure accept popup (incoming SECURE:INIT that needs user confirmation).
+    pub secure_accept_popup_visible: bool,
+    pub secure_accept_nick: String,
+    pub secure_accept_ephemeral_b64: String,
+    pub secure_accept_identity_b64: String,
+    pub secure_accept_key_changed: bool,
 
     /// File receive offer popup.
     pub file_receive_popup_visible: bool,
@@ -183,6 +196,8 @@ pub struct App {
 
     pub status_message: String,
 
+    /// Whether to fetch and render inline images for image URLs (from config).
+    pub render_images: bool,
     pub next_image_id: usize,
     pub inline_images: HashMap<usize, ratatui_image::protocol::StatefulProtocol>,
 }
@@ -239,7 +254,15 @@ impl App {
             keypair: Keypair::generate(),
             secure_sessions: HashMap::new(),
             pending_secure: HashSet::new(),
+            pending_secure_ephemeral: HashMap::new(),
+            known_keys: KnownKeys::default(),
+            known_keys_path: None,
             protocol_events: Vec::new(),
+            secure_accept_popup_visible: false,
+            secure_accept_nick: String::new(),
+            secure_accept_ephemeral_b64: String::new(),
+            secure_accept_identity_b64: String::new(),
+            secure_accept_key_changed: false,
             file_receive_popup_visible: false,
             file_receive_nick: String::new(),
             file_receive_filename: String::new(),
@@ -255,6 +278,7 @@ impl App {
             file_browser_pending_nick: String::new(),
             status_message: String::new(),
 
+            render_images: true,
             next_image_id: 0,
             inline_images: HashMap::new(),
         }

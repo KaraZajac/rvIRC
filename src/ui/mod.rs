@@ -106,6 +106,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_file_receive_popup(f, area, app);
     }
 
+    if app.secure_accept_popup_visible {
+        draw_secure_accept_popup(f, area, app);
+    }
+
     if app.file_browser_visible {
         draw_file_browser_popup(f, area, app);
     }
@@ -454,11 +458,17 @@ fn draw_channels_pane(f: &mut Frame, area: Rect, app: &App) {
                 Style::default()
             };
             if secure {
-                let line = Line::from(vec![
+                let server = app.current_server.as_deref().unwrap_or("unknown");
+                let verified = app.known_keys.is_verified(t, server);
+                let mut spans = vec![
                     Span::styled(prefix, style),
                     Span::styled("\u{1F512}", Style::default().fg(Color::Green)),
-                    Span::styled(format!("{}  ", label), style),
-                ]);
+                ];
+                if verified {
+                    spans.push(Span::styled("\u{2714}", Style::default().fg(Color::Green)));
+                }
+                spans.push(Span::styled(format!("{}  ", label), style));
+                let line = Line::from(spans);
                 ListItem::new(line)
             } else {
                 ListItem::new(Line::from(Span::styled(format!("{}{}  ", prefix, label), style)))
@@ -850,6 +860,59 @@ fn action_label(a: &UserAction) -> &'static str {
         UserAction::Mute => "Mute",
         UserAction::Whois => "Whois",
     }
+}
+
+fn draw_secure_accept_popup(f: &mut Frame, area: Rect, app: &App) {
+    let popup_width = 60;
+    let popup_height = if app.secure_accept_key_changed { 12 } else { 9 };
+    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
+    let popup_rect = Rect { x, y, width: popup_width, height: popup_height };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(2), Constraint::Length(1)])
+        .margin(1)
+        .split(popup_rect);
+
+    f.render_widget(Clear, popup_rect);
+    let popup_style = popup_overlay_style();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Secure Session Request ")
+        .style(popup_style);
+    f.render_widget(block, popup_rect);
+
+    let mut lines: Vec<Line> = vec![
+        Line::from(Span::raw(format!(
+            "{} wants to establish a secure session.",
+            app.secure_accept_nick
+        ))),
+        Line::from(""),
+    ];
+
+    if app.secure_accept_key_changed {
+        lines.push(Line::from(Span::styled(
+            "WARNING: This user's identity key has CHANGED!",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            "This could indicate a man-in-the-middle attack.",
+            Style::default().fg(Color::Red),
+        )));
+        lines.push(Line::from(""));
+    }
+
+    lines.push(Line::from("Accept? (y/n)"));
+
+    let para = Paragraph::new(Text::from(lines))
+        .style(popup_style)
+        .wrap(Wrap { trim: true });
+    f.render_widget(para, chunks[0]);
+
+    let hint = Paragraph::new("y / Enter: Accept | n / Esc: Reject")
+        .style(popup_style.add_modifier(Modifier::DIM));
+    f.render_widget(hint, chunks[1]);
 }
 
 fn draw_file_receive_popup(f: &mut Frame, area: Rect, app: &App) {
