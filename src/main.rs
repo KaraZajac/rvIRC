@@ -145,7 +145,18 @@ fn main() -> Result<(), String> {
                 }
                 M::ImageReady { image_id, ref image } => {
                     let protocol = picker.new_resize_protocol(image.clone());
-                    app.inline_images.insert(*image_id, protocol);
+                    app.inline_images.insert(*image_id, app::InlineImage::Static(protocol));
+                }
+                M::AnimatedImageReady { image_id, ref frames, ref delays } => {
+                    let encoded: Vec<_> = frames.iter()
+                        .map(|f| picker.new_resize_protocol(f.clone()))
+                        .collect();
+                    app.inline_images.insert(*image_id, app::InlineImage::Animated {
+                        frames: encoded,
+                        delays: delays.clone(),
+                        current_frame: 0,
+                        last_advance: std::time::Instant::now(),
+                    });
                 }
                 _ => {}
             }
@@ -304,36 +315,7 @@ fn apply_irc_message(
                     let image_id = app.next_image_id;
                     app.next_image_id += 1;
                     line.image_id = Some(image_id);
-                    let url = url.to_string();
-                    let tx = irc_tx.clone();
-                    rt.spawn(async move {
-                        let result = tokio::task::spawn_blocking(move || {
-                            let resp = ureq::get(&url).call().map_err(|e| format!("{}", e))?;
-                            let len = resp
-                                .header("content-length")
-                                .and_then(|s| s.parse::<usize>().ok())
-                                .unwrap_or(0);
-                            if len > 10_000_000 {
-                                return Err("Image too large (>10MB)".to_string());
-                            }
-                            let mut bytes = Vec::new();
-                            use std::io::Read;
-                            resp.into_reader()
-                                .take(10_000_000)
-                                .read_to_end(&mut bytes)
-                                .map_err(|e| format!("{}", e))?;
-                            image::load_from_memory(&bytes).map_err(|e| format!("{}", e))
-                        })
-                        .await
-                        .map_err(|e| format!("{}", e))
-                        .and_then(|r| r);
-                        match result {
-                            Ok(img) => {
-                                let _ = tx.send(IrcMessage::ImageReady { image_id, image: img });
-                            }
-                            Err(_e) => {}
-                        }
-                    });
+                    spawn_image_download(url, image_id, irc_tx, rt);
                 }
             }
             if target == app.current_nickname.as_deref().unwrap_or("") {
@@ -387,7 +369,7 @@ fn apply_irc_message(
             app.last_invite = Some((nick.clone(), channel.clone()));
             app.status_message = format!("{} invited you to {} (use :join {} to join)", nick, channel, channel);
         }
-        M::NickInUse | M::CtcpRequest { .. } | M::SendPrivmsg { .. } | M::Status(_) | M::ChatLog { .. } | M::ImageReady { .. } => {}
+        M::NickInUse | M::CtcpRequest { .. } | M::SendPrivmsg { .. } | M::Status(_) | M::ChatLog { .. } | M::ImageReady { .. } | M::AnimatedImageReady { .. } => {}
         M::Connected { server } => {
             app.current_server = Some(server);
             app.status_message = "Connected.".to_string();
@@ -1568,6 +1550,75 @@ fn restore_terminal() -> io::Result<()> {
 }
 
 const IMAGE_EXTS: &[&str] = &[".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"];
+const MAX_GIF_FRAMES: usize = 100;
+
+/// Spawn a background task to download an image URL, decode it, and send the
+/// result back via the IRC message channel. Detects animated GIFs and extracts
+/// all frames + delays.
+fn spawn_image_download(
+    url: &str,
+    image_id: usize,
+    irc_tx: &IrcMessageTx,
+    rt: &tokio::runtime::Runtime,
+) {
+    let url = url.to_string();
+    let tx = irc_tx.clone();
+    rt.spawn(async move {
+        let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let resp = ureq::get(&url).call().map_err(|e| format!("{}", e))?;
+            let len = resp
+                .header("content-length")
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(0);
+            if len > 10_000_000 {
+                return Err("Image too large (>10MB)".to_string());
+            }
+            let mut bytes = Vec::new();
+            use std::io::Read as _;
+            resp.into_reader()
+                .take(10_000_000)
+                .read_to_end(&mut bytes)
+                .map_err(|e| format!("{}", e))?;
+
+            let is_gif = url.to_lowercase().ends_with(".gif");
+
+            if is_gif {
+                use image::codecs::gif::GifDecoder;
+                use image::AnimationDecoder;
+                if let Ok(decoder) = GifDecoder::new(std::io::Cursor::new(&bytes)) {
+                    if let Ok(raw_frames) = decoder.into_frames().collect_frames() {
+                        if raw_frames.len() > 1 {
+                            let mut frames = Vec::with_capacity(raw_frames.len().min(MAX_GIF_FRAMES));
+                            let mut delays = Vec::with_capacity(frames.capacity());
+                            for frame in raw_frames.into_iter().take(MAX_GIF_FRAMES) {
+                                let (numer, denom) = frame.delay().numer_denom_ms();
+                                let ms = if denom == 0 { 100 } else { numer / denom };
+                                let ms = ms.max(20);
+                                delays.push(std::time::Duration::from_millis(ms as u64));
+                                let img = image::DynamicImage::ImageRgba8(frame.into_buffer());
+                                frames.push(img);
+                            }
+                            let _ = tx.send(IrcMessage::AnimatedImageReady {
+                                image_id,
+                                frames,
+                                delays,
+                            });
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+
+            let img = image::load_from_memory(&bytes).map_err(|e| format!("{}", e))?;
+            let _ = tx.send(IrcMessage::ImageReady { image_id, image: img });
+            Ok(())
+        })
+        .await
+        .map_err(|e| format!("{}", e))
+        .and_then(|r| r);
+        if let Err(_e) = result { }
+    });
+}
 
 /// Sanitize a filename from a remote peer to prevent path traversal. Returns only the
 /// last path component; if that is "." or ".." or empty, returns "file".
@@ -1812,36 +1863,7 @@ fn process_protocol_events(
                                     let image_id = app.next_image_id;
                                     app.next_image_id += 1;
                                     line.image_id = Some(image_id);
-                                    let url = url.to_string();
-                                    let tx = irc_tx.clone();
-                                    rt.spawn(async move {
-                                        let result = tokio::task::spawn_blocking(move || {
-                                            let resp = ureq::get(&url).call().map_err(|e| format!("{}", e))?;
-                                            let len = resp
-                                                .header("content-length")
-                                                .and_then(|s| s.parse::<usize>().ok())
-                                                .unwrap_or(0);
-                                            if len > 10_000_000 {
-                                                return Err("Image too large (>10MB)".to_string());
-                                            }
-                                            let mut bytes = Vec::new();
-                                            use std::io::Read;
-                                            resp.into_reader()
-                                                .take(10_000_000)
-                                                .read_to_end(&mut bytes)
-                                                .map_err(|e| format!("{}", e))?;
-                                            image::load_from_memory(&bytes).map_err(|e| format!("{}", e))
-                                        })
-                                        .await
-                                        .map_err(|e| format!("{}", e))
-                                        .and_then(|r| r);
-                                        match result {
-                                            Ok(img) => {
-                                                let _ = tx.send(IrcMessage::ImageReady { image_id, image: img });
-                                            }
-                                            Err(_e) => {}
-                                        }
-                                    });
+                                    spawn_image_download(url, image_id, irc_tx, rt);
                                 }
                             }
                             app.push_message(&from_nick, line);

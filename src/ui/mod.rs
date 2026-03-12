@@ -302,7 +302,9 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
         cur_y += avail_text_h;
 
         if let Some(img_id) = m.image_id {
-            if let Some(protocol) = app.inline_images.get_mut(&img_id) {
+            if let Some(inline) = app.inline_images.get_mut(&img_id) {
+                inline.advance_frame();
+                let protocol = inline.protocol_mut();
                 let img_h = IMAGE_DISPLAY_HEIGHT.min(max_y.saturating_sub(cur_y));
                 if img_h > 0 {
                     let img_rect = Rect { x: inner.x, y: cur_y, width: inner.width, height: img_h };

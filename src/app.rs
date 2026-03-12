@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::crypto::{Keypair, KnownKeys, SecureSession};
 
@@ -199,7 +199,40 @@ pub struct App {
     /// Whether to fetch and render inline images for image URLs (from config).
     pub render_images: bool,
     pub next_image_id: usize,
-    pub inline_images: HashMap<usize, ratatui_image::protocol::StatefulProtocol>,
+    pub inline_images: HashMap<usize, InlineImage>,
+}
+
+/// An inline image: either a static frame or an animated GIF with pre-encoded frames.
+pub enum InlineImage {
+    Static(ratatui_image::protocol::StatefulProtocol),
+    Animated {
+        frames: Vec<ratatui_image::protocol::StatefulProtocol>,
+        delays: Vec<Duration>,
+        current_frame: usize,
+        last_advance: Instant,
+    },
+}
+
+impl InlineImage {
+    pub fn protocol_mut(&mut self) -> &mut ratatui_image::protocol::StatefulProtocol {
+        match self {
+            InlineImage::Static(p) => p,
+            InlineImage::Animated { frames, current_frame, .. } => &mut frames[*current_frame],
+        }
+    }
+
+    /// Advance to the next frame if enough time has elapsed. Only call for visible images.
+    pub fn advance_frame(&mut self) {
+        if let InlineImage::Animated { frames, delays, current_frame, last_advance } = self {
+            if frames.is_empty() { return; }
+            let delay = delays.get(*current_frame).copied()
+                .unwrap_or(Duration::from_millis(100));
+            if last_advance.elapsed() >= delay {
+                *current_frame = (*current_frame + 1) % frames.len();
+                *last_advance = Instant::now();
+            }
+        }
+    }
 }
 
 impl App {

@@ -41,6 +41,12 @@ pub enum IrcMessage {
     ChatLog { target: String, text: String },
     /// Downloaded image ready for inline display.
     ImageReady { image_id: usize, image: image::DynamicImage },
+    /// Animated GIF ready: pre-decoded frames + per-frame delays.
+    AnimatedImageReady {
+        image_id: usize,
+        frames: Vec<image::DynamicImage>,
+        delays: Vec<std::time::Duration>,
+    },
 }
 
 fn server_entry_to_irc_config(entry: &ServerEntry, rv: &RvConfig) -> IrcConfig {
