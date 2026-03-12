@@ -17,6 +17,7 @@
 - **Auto-reconnect**: After an unexpected disconnect, the client retries up to 3 times (5s, 15s, 30s). Manual `:connect` or `:quit` cancels auto-reconnect.
 - **Encrypted DMs**: Two rvIRC clients can establish an end-to-end encrypted DM session using `:secure` (or `:secure <nick>`). Uses X25519 key exchange + ChaCha20-Poly1305 encryption. A green lock icon appears in the channel list next to secure sessions. In-chat status messages show the handshake progress.
 - **File Transfer**: Send files between rvIRC clients using `:sendfile` (opens a file browser) or `:sendfile <nick> <path>`. Uses [magic-wormhole](https://crates.io/crates/magic-wormhole) for secure relay-based file transfer. The recipient gets a popup to accept or reject the file. In-chat status messages track transfer progress.
+- **Message area**: Long messages wrap to the pane width. The view auto-scrolls to the bottom when new messages arrive (scroll up with k/j or Page Up/Down to read history). Links that end in an image extension (e.g. `.png`, `.jpg`, `.gif`) are fetched and displayed inline in the chat; this works in channels, DMs, and encrypted DMs (animated GIFs display as a static frame).
 
 ## Build & run
 
@@ -149,10 +150,10 @@ rvIRC supports end-to-end encrypted direct messages between rvIRC clients. This 
 2. Both clients exchange X25519 public keys via hidden protocol messages
 3. In-chat status messages show the handshake progress (key exchange, success/failure)
 4. Once established, all messages in that DM are encrypted with ChaCha20-Poly1305
-5. A green lock icon (🔒) appears next to the nick in the channels list
+5. A lock icon (🔒) appears next to the nick in the channels list
 6. Use `:unsecure` (or `:unsecure <nick>`) to end the encrypted session
 
-The key exchange and encrypted messages use `[:rvIRC:]`-prefixed protocol messages that are intercepted and never displayed to the user.
+The key exchange and encrypted messages use `[:rvIRC:]`-prefixed protocol messages that are intercepted and never displayed to the user. Inline image display works in encrypted DMs as well.
 
 ## File Transfer
 

@@ -7,8 +7,8 @@ authors = ["rvIRC"]
 license = "MIT"
 
 [dependencies]
-ratatui = "0.28"
-crossterm = "0.28"
+ratatui = "0.30"
+crossterm = "0.29"
 irc = { version = "1.1", default-features = true }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 serde = { version = "1", features = ["derive"] }
@@ -23,3 +23,6 @@ sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"
 magic-wormhole = "0.7"
+ratatui-image = { version = "10", default-features = false, features = ["crossterm"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+ureq = "2"

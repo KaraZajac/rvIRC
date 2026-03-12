@@ -39,6 +39,8 @@ pub enum IrcMessage {
     Status(String),
     /// In-chat log message (displayed as a system message in a DM/channel window).
     ChatLog { target: String, text: String },
+    /// Downloaded image ready for inline display.
+    ImageReady { image_id: usize, image: image::DynamicImage },
 }
 
 fn server_entry_to_irc_config(entry: &ServerEntry, rv: &RvConfig) -> IrcConfig {
@@ -120,7 +122,7 @@ fn message_line(msg: &irc::proto::Message) -> Option<(String, MessageLine)> {
     let target = format_message_target(msg).unwrap_or_else(|| "*server*".to_string());
     Some((
         target,
-        MessageLine { source, text, kind },
+        MessageLine { source, text, kind, image_id: None },
     ))
 }
 
@@ -303,6 +305,7 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx) {
                                         source,
                                         text: data,
                                         kind: MessageKind::Action,
+                                        image_id: None,
                                     },
                                 });
                             } else if matches!(tag.as_str(), "VERSION" | "PING" | "TIME") {

@@ -35,6 +35,9 @@ fn main() -> Result<(), String> {
     let mut client: Option<Client> = None;
     let mut stream_handle: Option<tokio::task::JoinHandle<()>> = None;
 
+    let picker = ratatui_image::picker::Picker::from_query_stdio()
+        .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
+
     let mut terminal = setup_terminal().map_err(|e| e.to_string())?;
     let mut auto_connect_attempted = false;
 
@@ -122,12 +125,17 @@ fn main() -> Result<(), String> {
                             source: "***".to_string(),
                             text: text.clone(),
                             kind: MessageKind::Other,
+                            image_id: None,
                         },
                     );
                 }
+                M::ImageReady { image_id, ref image } => {
+                    let protocol = picker.new_resize_protocol(image.clone());
+                    app.inline_images.insert(*image_id, protocol);
+                }
                 _ => {}
             }
-            apply_irc_message(&mut app, msg);
+            apply_irc_message(&mut app, msg, &irc_tx, &rt);
         }
 
         if !app.protocol_events.is_empty() {
@@ -250,10 +258,15 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
-fn apply_irc_message(app: &mut App, msg: IrcMessage) {
+fn apply_irc_message(
+    app: &mut App,
+    msg: IrcMessage,
+    irc_tx: &IrcMessageTx,
+    rt: &tokio::runtime::Runtime,
+) {
     use connection::IrcMessage as M;
     match msg {
-        M::Line { target, line } => {
+        M::Line { target, mut line } => {
             if line.text.starts_with("[:rvIRC:") {
                 if let Some(evt) = parse_rvirc_protocol(&line.source, &line.text) {
                     app.protocol_events.push(evt);
@@ -262,6 +275,41 @@ fn apply_irc_message(app: &mut App, msg: IrcMessage) {
                     app.dm_targets.push(line.source.clone());
                 }
                 return;
+            }
+            if let Some(url) = extract_image_url(&line.text) {
+                let image_id = app.next_image_id;
+                app.next_image_id += 1;
+                line.image_id = Some(image_id);
+                let url = url.to_string();
+                let tx = irc_tx.clone();
+                rt.spawn(async move {
+                    let result = tokio::task::spawn_blocking(move || {
+                        let resp = ureq::get(&url).call().map_err(|e| format!("{}", e))?;
+                        let len = resp
+                            .header("content-length")
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if len > 10_000_000 {
+                            return Err("Image too large (>10MB)".to_string());
+                        }
+                        let mut bytes = Vec::new();
+                        use std::io::Read;
+                        resp.into_reader()
+                            .take(10_000_000)
+                            .read_to_end(&mut bytes)
+                            .map_err(|e| format!("{}", e))?;
+                        image::load_from_memory(&bytes).map_err(|e| format!("{}", e))
+                    })
+                    .await
+                    .map_err(|e| format!("{}", e))
+                    .and_then(|r| r);
+                    match result {
+                        Ok(img) => {
+                            let _ = tx.send(IrcMessage::ImageReady { image_id, image: img });
+                        }
+                        Err(_e) => {}
+                    }
+                });
             }
             if target == app.current_nickname.as_deref().unwrap_or("") {
                 app.push_message(&line.source, line.clone());
@@ -314,7 +362,7 @@ fn apply_irc_message(app: &mut App, msg: IrcMessage) {
             app.last_invite = Some((nick.clone(), channel.clone()));
             app.status_message = format!("{} invited you to {} (use :join {} to join)", nick, channel, channel);
         }
-        M::NickInUse | M::CtcpRequest { .. } | M::SendPrivmsg { .. } | M::Status(_) | M::ChatLog { .. } => {}
+        M::NickInUse | M::CtcpRequest { .. } | M::SendPrivmsg { .. } | M::Status(_) | M::ChatLog { .. } | M::ImageReady { .. } => {}
         M::Connected { server } => {
             app.current_server = Some(server);
             app.status_message = "Connected.".to_string();
@@ -709,7 +757,7 @@ fn handle_key_action(
                                     let wire = format!("[:rvIRC:ENC:{}:{}]", nonce, ct);
                                     c.send_privmsg(&target, &wire).map_err(|e| e.to_string())?;
                                     let nick = app.current_nickname.clone().unwrap_or_else(|| "?".to_string());
-                                    app.push_message(&target, MessageLine { source: nick, text, kind: MessageKind::Privmsg });
+                                    app.push_message(&target, MessageLine { source: nick, text, kind: MessageKind::Privmsg, image_id: None });
                                 }
                                 Err(e) => {
                                     app.status_message = format!("Encrypt error: {}", e);
@@ -718,7 +766,7 @@ fn handle_key_action(
                         } else {
                             c.send_privmsg(&target, &text).map_err(|e| e.to_string())?;
                             let nick = app.current_nickname.clone().unwrap_or_else(|| "?".to_string());
-                            app.push_message(&target, MessageLine { source: nick, text, kind: MessageKind::Privmsg });
+                            app.push_message(&target, MessageLine { source: nick, text, kind: MessageKind::Privmsg, image_id: None });
                         }
                     }
                 } else {
@@ -1079,7 +1127,7 @@ fn run_command(
                                 let wire = format!("[:rvIRC:ENC:{}:{}]", nonce, ct);
                                 c.send_privmsg(&nick, &wire).map_err(|e| e.to_string())?;
                                 let our_nick = app.current_nickname.clone().unwrap_or_else(|| "?".to_string());
-                                app.push_message(&nick, MessageLine { source: our_nick, text: text.clone(), kind: MessageKind::Privmsg });
+                                app.push_message(&nick, MessageLine { source: our_nick, text: text.clone(), kind: MessageKind::Privmsg, image_id: None });
                             }
                             Err(e) => {
                                 app.status_message = format!("Encrypt error: {}", e);
@@ -1088,7 +1136,7 @@ fn run_command(
                     } else {
                         c.send_privmsg(&nick, &text).map_err(|e| e.to_string())?;
                         let our_nick = app.current_nickname.clone().unwrap_or_else(|| "?".to_string());
-                        app.push_message(&nick, MessageLine { source: our_nick, text: text.clone(), kind: MessageKind::Privmsg });
+                        app.push_message(&nick, MessageLine { source: our_nick, text: text.clone(), kind: MessageKind::Privmsg, image_id: None });
                     }
                 }
                 if !app.dm_targets.contains(&nick) {
@@ -1379,6 +1427,21 @@ fn restore_terminal() -> io::Result<()> {
     Ok(())
 }
 
+const IMAGE_EXTS: &[&str] = &[".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"];
+
+fn extract_image_url(text: &str) -> Option<&str> {
+    for word in text.split_whitespace() {
+        if (word.starts_with("http://") || word.starts_with("https://"))
+            && IMAGE_EXTS
+                .iter()
+                .any(|ext| word.to_lowercase().ends_with(ext))
+        {
+            return Some(word);
+        }
+    }
+    None
+}
+
 /// Parse a [:rvIRC:...] protocol message into a ProtocolEvent.
 fn parse_rvirc_protocol(from_nick: &str, text: &str) -> Option<app::ProtocolEvent> {
     use app::ProtocolEvent;
@@ -1436,8 +1499,8 @@ fn parse_rvirc_protocol(from_nick: &str, text: &str) -> Option<app::ProtocolEven
 fn process_protocol_events(
     app: &mut App,
     client: &mut Option<Client>,
-    _rt: &tokio::runtime::Runtime,
-    _irc_tx: &IrcMessageTx,
+    rt: &tokio::runtime::Runtime,
+    irc_tx: &IrcMessageTx,
 ) {
     use app::ProtocolEvent;
     let events: Vec<ProtocolEvent> = app.protocol_events.drain(..).collect();
@@ -1485,14 +1548,48 @@ fn process_protocol_events(
                 if let Some(session) = app.secure_sessions.get(&from_nick) {
                     match session.decrypt(&nonce_b64, &ciphertext_b64) {
                         Ok(plaintext) => {
-                            app.push_message(
-                                &from_nick,
-                                MessageLine {
-                                    source: from_nick.clone(),
-                                    text: plaintext,
-                                    kind: MessageKind::Privmsg,
-                                },
-                            );
+                            let mut line = MessageLine {
+                                source: from_nick.clone(),
+                                text: plaintext,
+                                kind: MessageKind::Privmsg,
+                                image_id: None,
+                            };
+                            if let Some(url) = extract_image_url(&line.text) {
+                                let image_id = app.next_image_id;
+                                app.next_image_id += 1;
+                                line.image_id = Some(image_id);
+                                let url = url.to_string();
+                                let tx = irc_tx.clone();
+                                rt.spawn(async move {
+                                    let result = tokio::task::spawn_blocking(move || {
+                                        let resp = ureq::get(&url).call().map_err(|e| format!("{}", e))?;
+                                        let len = resp
+                                            .header("content-length")
+                                            .and_then(|s| s.parse::<usize>().ok())
+                                            .unwrap_or(0);
+                                        if len > 10_000_000 {
+                                            return Err("Image too large (>10MB)".to_string());
+                                        }
+                                        let mut bytes = Vec::new();
+                                        use std::io::Read;
+                                        resp.into_reader()
+                                            .take(10_000_000)
+                                            .read_to_end(&mut bytes)
+                                            .map_err(|e| format!("{}", e))?;
+                                        image::load_from_memory(&bytes).map_err(|e| format!("{}", e))
+                                    })
+                                    .await
+                                    .map_err(|e| format!("{}", e))
+                                    .and_then(|r| r);
+                                    match result {
+                                        Ok(img) => {
+                                            let _ = tx.send(IrcMessage::ImageReady { image_id, image: img });
+                                        }
+                                        Err(_e) => {}
+                                    }
+                                });
+                            }
+                            app.push_message(&from_nick, line);
                         }
                         Err(e) => {
                             app.push_message(
@@ -1501,6 +1598,7 @@ fn process_protocol_events(
                                     source: "rvIRC".to_string(),
                                     text: format!("[decrypt error: {}]", e),
                                     kind: MessageKind::Other,
+                                    image_id: None,
                                 },
                             );
                         }
@@ -1512,6 +1610,7 @@ fn process_protocol_events(
                             source: from_nick.clone(),
                             text: "[encrypted message, no secure session]".to_string(),
                             kind: MessageKind::Other,
+                            image_id: None,
                         },
                     );
                 }

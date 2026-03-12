@@ -8,6 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
+use ratatui_image::StatefulImage;
 use unicode_width::UnicodeWidthStr;
 
 const CHANNELS_PANE_WIDTH: u16 = 22;
@@ -110,51 +111,176 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 }
 
-fn draw_message_area(f: &mut Frame, area: Rect, app: &App) {
-    let target_key = app.current_channel.as_deref().unwrap_or("*server*");
-    let messages = app.current_messages();
-    let all_lines: Vec<Line> = messages
-        .iter()
-        .filter(|m| !app.is_muted(target_key, &m.source))
-        .map(|m| format_message_line(m, app.current_nickname.as_deref()))
-        .collect();
-    let mut header_lines: Vec<Line> = Vec::new();
+const IMAGE_DISPLAY_HEIGHT: u16 = 12;
+
+fn message_wrapped_height(m: &MessageLine, _current_nick: Option<&str>, width: u16) -> u16 {
+    if width == 0 {
+        return 1;
+    }
+    let prefix = match m.kind {
+        MessageKind::Privmsg => format!("<{}> ", m.source),
+        MessageKind::Notice => format!("[{}] ", m.source),
+        MessageKind::Action => format!("* {} ", m.source),
+        MessageKind::Join => format!("*** {} ", m.source),
+        MessageKind::Part | MessageKind::Quit => format!("*** {} ", m.source),
+        MessageKind::Nick => format!("*** {} ", m.source),
+        MessageKind::Mode => "*** ".to_string(),
+        MessageKind::Other => format!("{} ", m.source),
+    };
+    let full = format!("{}{}", prefix, m.text);
+    let w = width as usize;
+    let display_width = full.width();
+    ((display_width + w - 1) / w).max(1) as u16
+}
+
+fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
+    let target_key = app.current_channel.as_deref().unwrap_or("*server*").to_string();
+    let title = app.current_target_title();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {} ", title));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let mut header_height: u16 = 0;
     if let Some(topic) = app.current_topic() {
-        header_lines.push(Line::from(Span::styled(
+        let line = Line::from(Span::styled(
             format!(" Topic: {} ", topic),
             Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
-        )));
+        ));
+        let r = Rect { x: inner.x, y: inner.y + header_height, width: inner.width, height: 1 };
+        f.render_widget(Paragraph::new(line), r);
+        header_height += 1;
     }
     if let Some(modes) = app.current_modes() {
-        header_lines.push(Line::from(Span::styled(
+        let line = Line::from(Span::styled(
             format!(" Modes: {} ", modes),
             Style::default().fg(Color::Green).add_modifier(Modifier::DIM),
-        )));
+        ));
+        let r = Rect { x: inner.x, y: inner.y + header_height, width: inner.width, height: 1 };
+        f.render_widget(Paragraph::new(line), r);
+        header_height += 1;
     }
-    let visible_rows = area
-        .height
-        .saturating_sub(2)
-        .saturating_sub(header_lines.len() as u16) as usize;
-    let (start, end) = if all_lines.len() <= visible_rows {
-        (0, all_lines.len())
-    } else {
-        let start = all_lines
-            .len()
-            .saturating_sub(visible_rows)
-            .saturating_sub(app.message_scroll_offset)
-            .max(0);
-        let end = all_lines.len().saturating_sub(app.message_scroll_offset).min(all_lines.len());
-        (start, end)
-    };
-    let lines: Vec<Line> = all_lines.get(start..end).unwrap_or(&[]).to_vec();
-    let title = app.current_target_title();
-    let mut all_content = header_lines;
-    all_content.extend(lines);
-    let paragraph = Paragraph::new(all_content)
-        .block(Block::default().borders(Borders::ALL).title(format!(" {} ", title)))
-        .wrap(Wrap { trim: true })
-        .style(Style::default());
-    f.render_widget(paragraph, area);
+
+    let content_y = inner.y + header_height;
+    let content_height = inner.height.saturating_sub(header_height) as usize;
+    if content_height == 0 {
+        return;
+    }
+
+    let messages: Vec<MessageLine> = app
+        .current_messages()
+        .iter()
+        .filter(|m| !app.is_muted(&target_key, &m.source))
+        .cloned()
+        .collect();
+
+    let nick_ref = app.current_nickname.as_deref();
+    let mut item_heights: Vec<u16> = Vec::with_capacity(messages.len());
+    for m in &messages {
+        let text_h = message_wrapped_height(m, nick_ref, inner.width);
+        let h = match m.image_id {
+            Some(id) if app.inline_images.contains_key(&id) => text_h + IMAGE_DISPLAY_HEIGHT,
+            Some(_) => text_h + 1,
+            None => text_h,
+        };
+        item_heights.push(h);
+    }
+
+    let total_rows: usize = item_heights.iter().map(|h| *h as usize).sum();
+    let scroll = app.message_scroll_offset;
+
+    let rows_from_bottom = scroll;
+    let bottom_skip: usize = rows_from_bottom.min(total_rows);
+
+    let mut visible_end = messages.len();
+    {
+        let mut acc: usize = 0;
+        for i in (0..messages.len()).rev() {
+            acc += item_heights[i] as usize;
+            if acc > bottom_skip {
+                visible_end = i + 1;
+                break;
+            }
+            if acc == bottom_skip {
+                visible_end = i;
+                break;
+            }
+        }
+        if acc < bottom_skip {
+            visible_end = 0;
+        }
+    }
+
+    let mut visible_start = 0;
+    {
+        let mut remaining = content_height;
+        let mut i = visible_end;
+        while i > 0 {
+            i -= 1;
+            let h = item_heights[i] as usize;
+            if h > remaining {
+                if visible_start == 0 && i + 1 == visible_end {
+                    visible_start = i;
+                }
+                break;
+            }
+            remaining -= h;
+            visible_start = i;
+        }
+        if visible_end > 0 && visible_start == 0 && remaining >= content_height {
+            visible_start = visible_end - 1;
+        }
+    }
+
+    let visible_rows: usize = item_heights[visible_start..visible_end]
+        .iter()
+        .map(|h| *h as usize)
+        .sum();
+    let top_pad = content_height.saturating_sub(visible_rows) as u16;
+    let mut cur_y = content_y + top_pad;
+    let max_y = content_y + content_height as u16;
+    let nick = app.current_nickname.as_deref().map(|s| s.to_string());
+
+    for i in visible_start..visible_end {
+        if cur_y >= max_y {
+            break;
+        }
+        let m = &messages[i];
+        let text_h = message_wrapped_height(m, nick.as_deref(), inner.width);
+        let avail_text_h = text_h.min(max_y.saturating_sub(cur_y));
+        let line = format_message_line(m, nick.as_deref());
+        let text_rect = Rect { x: inner.x, y: cur_y, width: inner.width, height: avail_text_h };
+        f.render_widget(
+            Paragraph::new(line).wrap(Wrap { trim: true }),
+            text_rect,
+        );
+        cur_y += avail_text_h;
+
+        if let Some(img_id) = m.image_id {
+            if let Some(protocol) = app.inline_images.get_mut(&img_id) {
+                let img_h = IMAGE_DISPLAY_HEIGHT.min(max_y.saturating_sub(cur_y));
+                if img_h > 0 {
+                    let img_rect = Rect { x: inner.x, y: cur_y, width: inner.width, height: img_h };
+                    let image_widget = StatefulImage::default();
+                    f.render_stateful_widget(image_widget, img_rect, protocol);
+                    cur_y += img_h;
+                }
+            } else if cur_y < max_y {
+                let loading = Paragraph::new(Line::from(Span::styled(
+                    "  [Loading image...]",
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                )));
+                let lr = Rect { x: inner.x, y: cur_y, width: inner.width, height: 1 };
+                f.render_widget(loading, lr);
+                cur_y += 1;
+            }
+        }
+    }
 }
 
 fn format_message_line<'a>(m: &'a MessageLine, current_nick: Option<&str>) -> Line<'a> {

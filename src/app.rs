@@ -37,6 +37,7 @@ pub struct MessageLine {
     pub source: String,
     pub text: String,
     pub kind: MessageKind,
+    pub image_id: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,6 +182,9 @@ pub struct App {
     pub file_browser_pending_nick: String,
 
     pub status_message: String,
+
+    pub next_image_id: usize,
+    pub inline_images: HashMap<usize, ratatui_image::protocol::StatefulProtocol>,
 }
 
 impl App {
@@ -250,6 +254,9 @@ impl App {
             file_browser_pending_code: String::new(),
             file_browser_pending_nick: String::new(),
             status_message: String::new(),
+
+            next_image_id: 0,
+            inline_images: HashMap::new(),
         }
     }
 
@@ -403,6 +410,7 @@ impl App {
                 source: "***".to_string(),
                 text: text.to_string(),
                 kind: MessageKind::Other,
+                image_id: None,
             },
         );
     }
