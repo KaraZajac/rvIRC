@@ -798,7 +798,8 @@ fn handle_key_action(
             app.push_chat_log(&nick, &format!("Accepted file: {}", filename));
 
             if let Some(dl_dir) = config.resolved_download_dir() {
-                let save_path = dl_dir.join(&filename);
+                let safe_name = sanitize_received_filename(&filename);
+                let save_path = dl_dir.join(&safe_name);
                 let tx = irc_tx.clone();
                 let nick_c = nick.clone();
                 app.push_chat_log(&nick, &format!("Saving to {}...", save_path.display()));
@@ -898,7 +899,8 @@ fn handle_key_action(
                 let nick = app.file_browser_pending_nick.clone();
                 app.file_browser_visible = false;
 
-                let save_path = save_dir.join(&filename);
+                let safe_name = sanitize_received_filename(&filename);
+                let save_path = save_dir.join(&safe_name);
                 let tx = irc_tx.clone();
                 let nick_c = nick.clone();
                 app.push_chat_log(&nick, &format!("Receiving {} to {}...", filename, save_path.display()));
@@ -1429,12 +1431,39 @@ fn restore_terminal() -> io::Result<()> {
 
 const IMAGE_EXTS: &[&str] = &[".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"];
 
+/// Sanitize a filename from a remote peer to prevent path traversal. Returns only the
+/// last path component; if that is "." or ".." or empty, returns "file".
+fn sanitize_received_filename(name: &str) -> String {
+    let s = name.trim();
+    if s.is_empty() {
+        return "file".to_string();
+    }
+    let base = std::path::Path::new(s)
+        .components()
+        .last()
+        .and_then(|c| c.as_os_str().to_str());
+    match base {
+        Some("") | Some(".") | Some("..") => "file".to_string(),
+        Some(b) => b.to_string(),
+        None => "file".to_string(),
+    }
+}
+
+/// Return true if the string is a safe http(s) URL for image fetch (no newlines, nulls, or control chars).
+fn is_safe_image_url(s: &str) -> bool {
+    if !s.starts_with("http://") && !s.starts_with("https://") {
+        return false;
+    }
+    !s.contains(|c: char| c == '\0' || c == '\n' || c == '\r' || c.is_control())
+}
+
 fn extract_image_url(text: &str) -> Option<&str> {
     for word in text.split_whitespace() {
         if (word.starts_with("http://") || word.starts_with("https://"))
             && IMAGE_EXTS
                 .iter()
                 .any(|ext| word.to_lowercase().ends_with(ext))
+            && is_safe_image_url(word)
         {
             return Some(word);
         }
@@ -1471,16 +1500,19 @@ fn parse_rvirc_protocol(from_nick: &str, text: &str) -> Option<app::ProtocolEven
         });
     }
     if let Some(rest) = inner.strip_prefix("WORMHOLE:OFFER:") {
-        let parts: Vec<&str> = rest.splitn(3, ':').collect();
-        if parts.len() == 3 {
-            return Some(ProtocolEvent::WormholeOffer {
-                from_nick: from_nick.to_string(),
-                code: parts[0].to_string(),
-                filename: parts[1].to_string(),
-                size: parts[2].parse().unwrap_or(0),
-            });
-        }
-        return None;
+        let mut parts = rest.rsplitn(2, ':');
+        let size_str = parts.next()?;
+        let code_and_name = parts.next()?;
+        let size = size_str.parse().unwrap_or(0);
+        let mut code_filename = code_and_name.splitn(2, ':');
+        let code = code_filename.next()?.to_string();
+        let filename = code_filename.next().unwrap_or("file").to_string();
+        return Some(ProtocolEvent::WormholeOffer {
+            from_nick: from_nick.to_string(),
+            code,
+            filename: sanitize_received_filename(&filename),
+            size,
+        });
     }
     if inner.starts_with("WORMHOLE:COMPLETE") {
         return Some(ProtocolEvent::WormholeComplete {
@@ -1629,7 +1661,7 @@ fn process_protocol_events(
                 ));
                 app.file_receive_popup_visible = true;
                 app.file_receive_nick = from_nick;
-                app.file_receive_filename = filename;
+                app.file_receive_filename = filename; // already sanitized in parse_rvirc_protocol
                 app.file_receive_size = size;
                 app.file_receive_code = code;
             }
