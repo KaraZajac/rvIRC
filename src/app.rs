@@ -1,7 +1,29 @@
 //! App state: mode, channels, users, message buffers, input, pane visibility.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::time::Instant;
+
+use crate::crypto::{Keypair, SecureSession};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileBrowserMode {
+    /// Choosing a directory to save a received file into.
+    ReceiveFile,
+    /// Choosing a file to send.
+    SendFile,
+}
+
+/// Protocol events from intercepted [:rvIRC:] messages, queued for main loop processing.
+#[derive(Debug)]
+pub enum ProtocolEvent {
+    SecureInit { from_nick: String, pubkey_b64: String },
+    SecureAck { from_nick: String, pubkey_b64: String },
+    Encrypted { from_nick: String, nonce_b64: String, ciphertext_b64: String },
+    WormholeOffer { from_nick: String, code: String, filename: String, size: u64 },
+    WormholeComplete { from_nick: String },
+    WormholeReject { from_nick: String },
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -128,6 +150,36 @@ pub struct App {
     pub reconnect_after: Option<Instant>,
     pub reconnect_attempt: u8,
 
+    /// Ephemeral keypair for encrypted DM sessions (generated on startup).
+    pub keypair: Keypair,
+    /// Active encrypted sessions keyed by nick (case-sensitive as received from IRC).
+    pub secure_sessions: HashMap<String, SecureSession>,
+    /// Nicks where we sent a SECURE:INIT and are waiting for ACK.
+    pub pending_secure: HashSet<String>,
+    /// Queued protocol events from intercepted [:rvIRC:] messages.
+    pub protocol_events: Vec<ProtocolEvent>,
+
+    /// File receive offer popup.
+    pub file_receive_popup_visible: bool,
+    pub file_receive_nick: String,
+    pub file_receive_filename: String,
+    pub file_receive_size: u64,
+    pub file_receive_code: String,
+
+    /// File browser popup (for choosing save directory).
+    pub file_browser_visible: bool,
+    pub file_browser_path: PathBuf,
+    pub file_browser_entries: Vec<(String, bool)>,
+    pub file_browser_selected_index: usize,
+    /// What the file browser is being used for.
+    pub file_browser_mode: FileBrowserMode,
+    /// Pending filename to save after directory is chosen.
+    pub file_browser_pending_filename: String,
+    /// Pending wormhole code to use after directory is chosen.
+    pub file_browser_pending_code: String,
+    /// Pending nick who sent the file.
+    pub file_browser_pending_nick: String,
+
     pub status_message: String,
 }
 
@@ -180,8 +232,50 @@ impl App {
             reconnect_server: None,
             reconnect_after: None,
             reconnect_attempt: 0,
+            keypair: Keypair::generate(),
+            secure_sessions: HashMap::new(),
+            pending_secure: HashSet::new(),
+            protocol_events: Vec::new(),
+            file_receive_popup_visible: false,
+            file_receive_nick: String::new(),
+            file_receive_filename: String::new(),
+            file_receive_size: 0,
+            file_receive_code: String::new(),
+            file_browser_visible: false,
+            file_browser_path: PathBuf::new(),
+            file_browser_entries: Vec::new(),
+            file_browser_selected_index: 0,
+            file_browser_mode: FileBrowserMode::ReceiveFile,
+            file_browser_pending_filename: String::new(),
+            file_browser_pending_code: String::new(),
+            file_browser_pending_nick: String::new(),
             status_message: String::new(),
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn has_secure_session(&self, nick: &str) -> bool {
+        self.secure_sessions.contains_key(nick)
+    }
+
+    /// Populate file_browser_entries from the directory at file_browser_path.
+    pub fn refresh_file_browser(&mut self) {
+        let mut entries = Vec::new();
+        if let Ok(read_dir) = std::fs::read_dir(&self.file_browser_path) {
+            for entry in read_dir.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') {
+                    continue;
+                }
+                let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                entries.push((name, is_dir));
+            }
+        }
+        entries.sort_by(|a, b| {
+            b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+        });
+        self.file_browser_entries = entries;
+        self.file_browser_selected_index = 0;
     }
 
     /// Clear auto-reconnect state (e.g. after manual connect or quit).
@@ -299,6 +393,29 @@ impl App {
         } else {
             None
         }
+    }
+
+    /// Push a system/status message into a DM/channel chat window.
+    pub fn push_chat_log(&mut self, target: &str, text: &str) {
+        self.push_message(
+            target,
+            MessageLine {
+                source: "***".to_string(),
+                text: text.to_string(),
+                kind: MessageKind::Other,
+            },
+        );
+    }
+
+    /// If the current channel is a DM (not a #channel or *server*), return the nick.
+    pub fn current_dm_nick(&self) -> Option<String> {
+        self.current_channel.as_ref().and_then(|ch| {
+            if ch.starts_with('#') || ch.starts_with('&') || ch == "*server*" {
+                None
+            } else {
+                Some(ch.clone())
+            }
+        })
     }
 
     pub fn push_message(&mut self, target: &str, line: MessageLine) {

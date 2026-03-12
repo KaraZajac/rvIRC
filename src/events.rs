@@ -16,12 +16,20 @@ pub fn handle_key(
     whois_popup_visible: bool,
     credits_popup_visible: bool,
     license_popup_visible: bool,
+    file_receive_popup_visible: bool,
+    file_browser_visible: bool,
 ) -> Option<KeyAction> {
     let key = match event {
         Event::Key(k) => k,
         _ => return None,
     };
 
+    if file_browser_visible {
+        return Some(handle_file_browser(key));
+    }
+    if file_receive_popup_visible {
+        return Some(handle_file_receive_popup(key));
+    }
     if credits_popup_visible {
         return Some(handle_credits_popup(key));
     }
@@ -102,6 +110,14 @@ pub enum KeyAction {
     InputHistoryUp,
     InputHistoryDown,
     TabComplete,
+    FileReceiveAccept,
+    FileReceiveReject,
+    FileBrowserUp,
+    FileBrowserDown,
+    FileBrowserEnter,
+    FileBrowserBack,
+    FileBrowserSelect,
+    FileBrowserClose,
 }
 
 fn handle_normal(key: KeyEvent, panel_focus: PanelFocus) -> Option<KeyAction> {
@@ -214,6 +230,26 @@ fn handle_server_list_popup(key: KeyEvent) -> KeyAction {
         KeyCode::Enter => KeyAction::ServerListPopupSelect,
         KeyCode::Up | KeyCode::Char('k') => KeyAction::ServerListPopupUp,
         KeyCode::Down | KeyCode::Char('j') => KeyAction::ServerListPopupDown,
+        _ => KeyAction::NoOp,
+    }
+}
+
+fn handle_file_receive_popup(key: KeyEvent) -> KeyAction {
+    match key.code {
+        KeyCode::Char('y') | KeyCode::Enter => KeyAction::FileReceiveAccept,
+        KeyCode::Char('n') | KeyCode::Esc => KeyAction::FileReceiveReject,
+        _ => KeyAction::NoOp,
+    }
+}
+
+fn handle_file_browser(key: KeyEvent) -> KeyAction {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => KeyAction::FileBrowserUp,
+        KeyCode::Down | KeyCode::Char('j') => KeyAction::FileBrowserDown,
+        KeyCode::Enter => KeyAction::FileBrowserEnter,
+        KeyCode::Backspace => KeyAction::FileBrowserBack,
+        KeyCode::Char('s') => KeyAction::FileBrowserSelect,
+        KeyCode::Esc | KeyCode::Char('q') => KeyAction::FileBrowserClose,
         _ => KeyAction::NoOp,
     }
 }

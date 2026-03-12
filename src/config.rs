@@ -12,6 +12,9 @@ pub struct RvConfig {
     #[serde(default)]
     pub alt_nick: Option<String>,
     pub real_name: Option<String>,
+    /// Default directory for received file transfers. Expands ~ to home dir.
+    #[serde(default)]
+    pub download_dir: Option<String>,
     #[serde(default)]
     pub servers: Vec<ServerEntry>,
 }
@@ -99,12 +102,28 @@ impl RvConfig {
         toml::from_str(&s).map_err(|e| e.to_string())
     }
 
+    /// Resolve download_dir, expanding ~ to home directory. Returns None if not set.
+    pub fn resolved_download_dir(&self) -> Option<PathBuf> {
+        self.download_dir.as_ref().map(|d| {
+            if d.starts_with('~') {
+                if let Some(home) = directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf()) {
+                    home.join(d.strip_prefix("~/").unwrap_or(&d[1..]))
+                } else {
+                    PathBuf::from(d)
+                }
+            } else {
+                PathBuf::from(d)
+            }
+        })
+    }
+
     fn default_config() -> RvConfig {
         RvConfig {
             username: Some("user".to_string()),
             nickname: Some("rvirc_user".to_string()),
             alt_nick: None,
             real_name: Some("rvIRC User".to_string()),
+            download_dir: None,
             servers: vec![
                 ServerEntry {
                     name: "Libera".to_string(),

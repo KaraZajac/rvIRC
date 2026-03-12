@@ -31,6 +31,9 @@ pub enum CommandResult {
     Version,
     Credits,
     License,
+    Secure(String),
+    Unsecure(String),
+    SendFile { nick: String, path: String },
     NoOp,
     Unknown(String),
 }
@@ -168,6 +171,20 @@ pub fn parse(line: &str) -> CommandResult {
         "version" => CommandResult::Version,
         "credits" => CommandResult::Credits,
         "license" => CommandResult::License,
+        "secure" => {
+            let nick = rest.split_whitespace().next().unwrap_or("").to_string();
+            CommandResult::Secure(nick)
+        }
+        "unsecure" => {
+            let nick = rest.split_whitespace().next().unwrap_or("").to_string();
+            CommandResult::Unsecure(nick)
+        }
+        "sendfile" => {
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            let nick = parts.next().unwrap_or("").to_string();
+            let path = parts.next().unwrap_or("").trim().to_string();
+            CommandResult::SendFile { nick, path }
+        }
         _ => CommandResult::Unknown(format!("Unknown command: {}", cmd)),
     }
 }

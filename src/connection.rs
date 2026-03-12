@@ -33,6 +33,12 @@ pub enum IrcMessage {
     NickInUse,
     /// Incoming CTCP request (VERSION, PING, TIME) - main loop sends reply.
     CtcpRequest { from_nick: String, target: String, tag: String, data: String },
+    /// Send a PRIVMSG from an async task (e.g. wormhole code relay).
+    SendPrivmsg { target: String, text: String },
+    /// Status message from an async task.
+    Status(String),
+    /// In-chat log message (displayed as a system message in a DM/channel window).
+    ChatLog { target: String, text: String },
 }
 
 fn server_entry_to_irc_config(entry: &ServerEntry, rv: &RvConfig) -> IrcConfig {

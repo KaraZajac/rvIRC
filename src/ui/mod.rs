@@ -100,6 +100,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.license_popup_visible {
         draw_license_popup(f, area, app);
     }
+
+    if app.file_receive_popup_visible {
+        draw_file_receive_popup(f, area, app);
+    }
+
+    if app.file_browser_visible {
+        draw_file_browser_popup(f, area, app);
+    }
 }
 
 fn draw_message_area(f: &mut Frame, area: Rect, app: &App) {
@@ -249,10 +257,11 @@ fn draw_channels_pane(f: &mut Frame, area: Rect, app: &App) {
         .enumerate()
         .map(|(i, t)| {
             let label = target_display_label(app, t);
-            let line_str = if show_selector && i == app.channel_index {
-                format!("> {}  ", label)
+            let secure = app.secure_sessions.contains_key(t);
+            let prefix = if show_selector && i == app.channel_index {
+                "> "
             } else {
-                format!("  {}  ", label)
+                "  "
             };
             let style = if app.unread_mentions.contains(t) {
                 Style::default().fg(Color::Red)
@@ -261,7 +270,16 @@ fn draw_channels_pane(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 Style::default()
             };
-            ListItem::new(Line::from(Span::styled(line_str, style)))
+            if secure {
+                let line = Line::from(vec![
+                    Span::styled(prefix, style),
+                    Span::styled("\u{1F512}", Style::default().fg(Color::Green)),
+                    Span::styled(format!("{}  ", label), style),
+                ]);
+                ListItem::new(line)
+            } else {
+                ListItem::new(Line::from(Span::styled(format!("{}{}  ", prefix, label), style)))
+            }
         })
         .collect();
     let list = List::new(items)
@@ -649,4 +667,125 @@ fn action_label(a: &UserAction) -> &'static str {
         UserAction::Mute => "Mute",
         UserAction::Whois => "Whois",
     }
+}
+
+fn draw_file_receive_popup(f: &mut Frame, area: Rect, app: &App) {
+    let popup_width = 56;
+    let popup_height = 9;
+    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
+    let popup_rect = Rect { x, y, width: popup_width, height: popup_height };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(2), Constraint::Length(1)])
+        .margin(1)
+        .split(popup_rect);
+
+    f.render_widget(Clear, popup_rect);
+    let popup_style = popup_overlay_style();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" File Transfer ")
+        .style(popup_style);
+    f.render_widget(block, popup_rect);
+
+    let size_display = if app.file_receive_size >= 1_048_576 {
+        format!("{:.1} MB", app.file_receive_size as f64 / 1_048_576.0)
+    } else if app.file_receive_size >= 1024 {
+        format!("{:.1} KB", app.file_receive_size as f64 / 1024.0)
+    } else {
+        format!("{} B", app.file_receive_size)
+    };
+
+    let text = format!(
+        "{} wants to send you:\n  {} ({})\n\nAccept?",
+        app.file_receive_nick, app.file_receive_filename, size_display
+    );
+    let para = Paragraph::new(text)
+        .style(popup_style)
+        .wrap(Wrap { trim: true });
+    f.render_widget(para, chunks[0]);
+
+    let hint = Paragraph::new("y / Enter: Accept | n / Esc: Reject")
+        .style(popup_style.add_modifier(Modifier::DIM));
+    f.render_widget(hint, chunks[1]);
+}
+
+fn draw_file_browser_popup(f: &mut Frame, area: Rect, app: &App) {
+    let popup_width = (area.width * 3 / 4).min(64).max(36);
+    let popup_height = (area.height * 3 / 4).min(22).max(10);
+    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
+    let popup_rect = Rect { x, y, width: popup_width, height: popup_height };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Min(3),
+            Constraint::Length(1),
+        ])
+        .margin(1)
+        .split(popup_rect);
+
+    f.render_widget(Clear, popup_rect);
+    let popup_style = popup_overlay_style();
+    use crate::app::FileBrowserMode;
+    let title = match app.file_browser_mode {
+        FileBrowserMode::ReceiveFile => " Choose Save Directory ",
+        FileBrowserMode::SendFile => " Choose File to Send ",
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .style(popup_style);
+    f.render_widget(block, popup_rect);
+
+    let path_str = app.file_browser_path.display().to_string();
+    let path_para = Paragraph::new(path_str).style(popup_style.add_modifier(Modifier::BOLD));
+    f.render_widget(path_para, chunks[0]);
+
+    let list_items: Vec<ListItem> = if app.file_browser_entries.is_empty() {
+        vec![ListItem::new("  (empty directory)")]
+    } else {
+        app.file_browser_entries
+            .iter()
+            .enumerate()
+            .map(|(i, (name, is_dir))| {
+                let prefix = if i == app.file_browser_selected_index { "> " } else { "  " };
+                let suffix = if *is_dir { "/" } else { "" };
+                let style = if *is_dir {
+                    popup_style.fg(Color::Cyan)
+                } else {
+                    popup_style
+                };
+                ListItem::new(Line::from(Span::styled(format!("{}{}{}", prefix, name, suffix), style)))
+            })
+            .collect()
+    };
+
+    let list = List::new(list_items).style(popup_style);
+    let list_area = chunks[1];
+    let visible = list_area.height as usize;
+    let len = app.file_browser_entries.len();
+    let offset = if len <= visible || visible == 0 {
+        0
+    } else {
+        (app.file_browser_selected_index + 1)
+            .saturating_sub(visible)
+            .min(len.saturating_sub(visible))
+    };
+    let mut list_state = ListState::default()
+        .with_selected(Some(app.file_browser_selected_index))
+        .with_offset(offset);
+    f.render_stateful_widget(list, list_area, &mut list_state);
+
+    let hint_text = match app.file_browser_mode {
+        FileBrowserMode::ReceiveFile => "j/k: navigate | Enter: open dir | Backspace: up | s: save here | Esc: cancel",
+        FileBrowserMode::SendFile => "j/k: navigate | Enter: open dir / select file | Backspace: up | Esc: cancel",
+    };
+    let hint = Paragraph::new(hint_text)
+        .style(popup_style.add_modifier(Modifier::DIM));
+    f.render_widget(hint, chunks[2]);
 }

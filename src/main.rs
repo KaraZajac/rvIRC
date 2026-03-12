@@ -4,12 +4,15 @@ mod app;
 mod commands;
 mod config;
 mod connection;
+mod crypto;
 mod events;
+mod filetransfer;
 mod ui;
 
 use app::{App, MessageKind, MessageLine, Mode, PanelFocus, UserAction};
 use config::RvConfig;
 use connection::{connect, run_stream, IrcMessage, IrcMessageTx};
+use crypto::SecureSession;
 use events::{handle_key, KeyAction};
 use irc::client::prelude::*;
 use irc::proto::Command as IrcCommand;
@@ -17,6 +20,7 @@ use irc::proto::{ChannelMode as IrcChannelMode, Mode as IrcMode};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io;
+use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 fn main() -> Result<(), String> {
@@ -103,9 +107,31 @@ fn main() -> Result<(), String> {
                         }
                     }
                 }
+                M::SendPrivmsg { ref target, ref text } => {
+                    if let Some(ref c) = client {
+                        let _ = c.send_privmsg(target, text);
+                    }
+                }
+                M::Status(ref s) => {
+                    app.status_message = s.clone();
+                }
+                M::ChatLog { ref target, ref text } => {
+                    app.push_message(
+                        target,
+                        MessageLine {
+                            source: "***".to_string(),
+                            text: text.clone(),
+                            kind: MessageKind::Other,
+                        },
+                    );
+                }
                 _ => {}
             }
             apply_irc_message(&mut app, msg);
+        }
+
+        if !app.protocol_events.is_empty() {
+            process_protocol_events(&mut app, &mut client, &rt, &irc_tx);
         }
 
         // Auto-join channels after connect: identify first, then join (delay when we identified)
@@ -196,7 +222,7 @@ fn main() -> Result<(), String> {
         let key_action = if let Ok(true) = event {
             crossterm::event::read()
                 .ok()
-                .and_then(|ev| handle_key(ev, app.mode, app.panel_focus, app.channel_panel_visible, app.user_panel_visible, app.user_action_menu, app.channel_list_popup_visible, app.channel_list_scroll_mode, app.server_list_popup_visible, app.whois_popup_visible, app.credits_popup_visible, app.license_popup_visible))
+                .and_then(|ev| handle_key(ev, app.mode, app.panel_focus, app.channel_panel_visible, app.user_panel_visible, app.user_action_menu, app.channel_list_popup_visible, app.channel_list_scroll_mode, app.server_list_popup_visible, app.whois_popup_visible, app.credits_popup_visible, app.license_popup_visible, app.file_receive_popup_visible, app.file_browser_visible))
         } else {
             None
         };
@@ -228,6 +254,15 @@ fn apply_irc_message(app: &mut App, msg: IrcMessage) {
     use connection::IrcMessage as M;
     match msg {
         M::Line { target, line } => {
+            if line.text.starts_with("[:rvIRC:") {
+                if let Some(evt) = parse_rvirc_protocol(&line.source, &line.text) {
+                    app.protocol_events.push(evt);
+                }
+                if !app.dm_targets.contains(&line.source) {
+                    app.dm_targets.push(line.source.clone());
+                }
+                return;
+            }
             if target == app.current_nickname.as_deref().unwrap_or("") {
                 app.push_message(&line.source, line.clone());
                 if !app.dm_targets.contains(&line.source) {
@@ -279,7 +314,7 @@ fn apply_irc_message(app: &mut App, msg: IrcMessage) {
             app.last_invite = Some((nick.clone(), channel.clone()));
             app.status_message = format!("{} invited you to {} (use :join {} to join)", nick, channel, channel);
         }
-        M::NickInUse | M::CtcpRequest { .. } => {}
+        M::NickInUse | M::CtcpRequest { .. } | M::SendPrivmsg { .. } | M::Status(_) | M::ChatLog { .. } => {}
         M::Connected { server } => {
             app.current_server = Some(server);
             app.status_message = "Connected.".to_string();
@@ -667,9 +702,24 @@ fn handle_key_action(
                     if target == "*server*" {
                         app.status_message = "Cannot send to server.".to_string();
                     } else if !text.is_empty() {
-                        c.send_privmsg(&target, &text).map_err(|e| e.to_string())?;
-                        let nick = app.current_nickname.clone().unwrap_or_else(|| "?".to_string());
-                        app.push_message(&target, MessageLine { source: nick, text, kind: MessageKind::Privmsg });
+                        if app.secure_sessions.contains_key(&target) {
+                            let session = app.secure_sessions.get_mut(&target).unwrap();
+                            match session.encrypt(&text) {
+                                Ok((nonce, ct)) => {
+                                    let wire = format!("[:rvIRC:ENC:{}:{}]", nonce, ct);
+                                    c.send_privmsg(&target, &wire).map_err(|e| e.to_string())?;
+                                    let nick = app.current_nickname.clone().unwrap_or_else(|| "?".to_string());
+                                    app.push_message(&target, MessageLine { source: nick, text, kind: MessageKind::Privmsg });
+                                }
+                                Err(e) => {
+                                    app.status_message = format!("Encrypt error: {}", e);
+                                }
+                            }
+                        } else {
+                            c.send_privmsg(&target, &text).map_err(|e| e.to_string())?;
+                            let nick = app.current_nickname.clone().unwrap_or_else(|| "?".to_string());
+                            app.push_message(&target, MessageLine { source: nick, text, kind: MessageKind::Privmsg });
+                        }
                     }
                 } else {
                     app.status_message = "Not connected.".to_string();
@@ -690,6 +740,151 @@ fn handle_key_action(
                     return Ok(true);
                 }
             }
+        }
+        FileReceiveAccept => {
+            let code = app.file_receive_code.clone();
+            let filename = app.file_receive_filename.clone();
+            let nick = app.file_receive_nick.clone();
+            app.file_receive_popup_visible = false;
+
+            app.push_chat_log(&nick, &format!("Accepted file: {}", filename));
+
+            if let Some(dl_dir) = config.resolved_download_dir() {
+                let save_path = dl_dir.join(&filename);
+                let tx = irc_tx.clone();
+                let nick_c = nick.clone();
+                app.push_chat_log(&nick, &format!("Saving to {}...", save_path.display()));
+                app.status_message = format!("Receiving {} from {}...", filename, nick);
+                rt.spawn(async move {
+                    match filetransfer::receive_file(&code, &save_path, &nick_c, &tx).await {
+                        Ok(()) => {
+                            let _ = tx.send(IrcMessage::SendPrivmsg {
+                                target: nick_c.clone(),
+                                text: "[:rvIRC:WORMHOLE:COMPLETE]".to_string(),
+                            });
+                            let _ = tx.send(IrcMessage::Status(format!(
+                                "File saved to {}",
+                                save_path.display()
+                            )));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(IrcMessage::ChatLog {
+                                target: nick_c,
+                                text: format!("File receive failed: {}", e),
+                            });
+                            let _ = tx.send(IrcMessage::Status(format!("File receive failed: {}", e)));
+                        }
+                    }
+                });
+            } else {
+                app.file_browser_visible = true;
+                app.file_browser_pending_filename = filename;
+                app.file_browser_pending_code = code;
+                app.file_browser_pending_nick = nick;
+                app.file_browser_mode = app::FileBrowserMode::ReceiveFile;
+                let home = directories::BaseDirs::new()
+                    .map(|b| b.home_dir().to_path_buf())
+                    .unwrap_or_else(|| PathBuf::from("/"));
+                app.file_browser_path = home;
+                app.refresh_file_browser();
+            }
+        }
+        FileReceiveReject => {
+            let nick = app.file_receive_nick.clone();
+            app.file_receive_popup_visible = false;
+            if let Some(ref c) = client {
+                let _ = c.send_privmsg(&nick, "[:rvIRC:WORMHOLE:REJECT]");
+            }
+            app.status_message = format!("Rejected file from {}.", nick);
+        }
+        FileBrowserUp => {
+            app.file_browser_selected_index = app.file_browser_selected_index.saturating_sub(1);
+        }
+        FileBrowserDown => {
+            if app.file_browser_selected_index + 1 < app.file_browser_entries.len() {
+                app.file_browser_selected_index += 1;
+            }
+        }
+        FileBrowserEnter => {
+            if let Some((name, is_dir)) = app.file_browser_entries.get(app.file_browser_selected_index).cloned() {
+                if is_dir {
+                    app.file_browser_path = app.file_browser_path.join(&name);
+                    app.refresh_file_browser();
+                } else if app.file_browser_mode == app::FileBrowserMode::SendFile {
+                    let file_path = app.file_browser_path.join(&name);
+                    let nick = app.file_browser_pending_nick.clone();
+                    app.file_browser_visible = false;
+
+                    let tx = irc_tx.clone();
+                    let nick_clone = nick.clone();
+                    app.push_chat_log(&nick, &format!("Starting file send: {}", name));
+                    app.status_message = format!("Starting file send of {} to {}...", name, nick);
+                    rt.spawn(async move {
+                        match filetransfer::send_file(&file_path, nick_clone.clone(), tx.clone()).await {
+                            Ok(()) => {}
+                            Err(e) => {
+                                let _ = tx.send(IrcMessage::ChatLog {
+                                    target: nick_clone.clone(),
+                                    text: format!("File send failed: {}", e),
+                                });
+                                let _ = tx.send(IrcMessage::Status(format!(
+                                    "File send failed: {}", e
+                                )));
+                            }
+                        }
+                    });
+                }
+            }
+        }
+        FileBrowserBack => {
+            if let Some(parent) = app.file_browser_path.parent().map(|p| p.to_path_buf()) {
+                app.file_browser_path = parent;
+                app.refresh_file_browser();
+            }
+        }
+        FileBrowserSelect => {
+            if app.file_browser_mode == app::FileBrowserMode::ReceiveFile {
+                let save_dir = app.file_browser_path.clone();
+                let filename = app.file_browser_pending_filename.clone();
+                let code = app.file_browser_pending_code.clone();
+                let nick = app.file_browser_pending_nick.clone();
+                app.file_browser_visible = false;
+
+                let save_path = save_dir.join(&filename);
+                let tx = irc_tx.clone();
+                let nick_c = nick.clone();
+                app.push_chat_log(&nick, &format!("Receiving {} to {}...", filename, save_path.display()));
+                app.status_message = format!("Receiving {} from {}...", filename, nick);
+                rt.spawn(async move {
+                    match filetransfer::receive_file(&code, &save_path, &nick_c, &tx).await {
+                        Ok(()) => {
+                            let _ = tx.send(IrcMessage::SendPrivmsg {
+                                target: nick_c.clone(),
+                                text: "[:rvIRC:WORMHOLE:COMPLETE]".to_string(),
+                            });
+                            let _ = tx.send(IrcMessage::Status(format!(
+                                "File saved to {}",
+                                save_path.display()
+                            )));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(IrcMessage::ChatLog {
+                                target: nick_c,
+                                text: format!("File receive failed: {}", e),
+                            });
+                            let _ = tx.send(IrcMessage::Status(format!("File receive failed: {}", e)));
+                        }
+                    }
+                });
+            }
+        }
+        FileBrowserClose => {
+            app.file_browser_visible = false;
+            let nick = app.file_browser_pending_nick.clone();
+            if let Some(ref c) = client {
+                let _ = c.send_privmsg(&nick, "[:rvIRC:WORMHOLE:REJECT]");
+            }
+            app.status_message = "File transfer cancelled.".to_string();
         }
         Esc => {
             app.mode = Mode::Normal;
@@ -877,9 +1072,24 @@ fn run_command(
         R::Msg { nick, text } => {
             if let Some(ref c) = client {
                 if !text.is_empty() {
-                    c.send_privmsg(&nick, &text).map_err(|e| e.to_string())?;
-                    let our_nick = app.current_nickname.clone().unwrap_or_else(|| "?".to_string());
-                    app.push_message(&nick, MessageLine { source: our_nick, text: text.clone(), kind: MessageKind::Privmsg });
+                    if app.secure_sessions.contains_key(&nick) {
+                        let session = app.secure_sessions.get_mut(&nick).unwrap();
+                        match session.encrypt(&text) {
+                            Ok((nonce, ct)) => {
+                                let wire = format!("[:rvIRC:ENC:{}:{}]", nonce, ct);
+                                c.send_privmsg(&nick, &wire).map_err(|e| e.to_string())?;
+                                let our_nick = app.current_nickname.clone().unwrap_or_else(|| "?".to_string());
+                                app.push_message(&nick, MessageLine { source: our_nick, text: text.clone(), kind: MessageKind::Privmsg });
+                            }
+                            Err(e) => {
+                                app.status_message = format!("Encrypt error: {}", e);
+                            }
+                        }
+                    } else {
+                        c.send_privmsg(&nick, &text).map_err(|e| e.to_string())?;
+                        let our_nick = app.current_nickname.clone().unwrap_or_else(|| "?".to_string());
+                        app.push_message(&nick, MessageLine { source: our_nick, text: text.clone(), kind: MessageKind::Privmsg });
+                    }
                 }
                 if !app.dm_targets.contains(&nick) {
                     app.dm_targets.push(nick.clone());
@@ -1004,6 +1214,95 @@ fn run_command(
         }
         R::NoOp => {}
         R::Unknown(m) => app.status_message = m,
+        R::Secure(nick_arg) => {
+            let nick = if nick_arg.is_empty() {
+                app.current_dm_nick().unwrap_or_default()
+            } else {
+                nick_arg
+            };
+            if nick.is_empty() {
+                app.status_message = "Usage: :secure <nick> (or use in a DM)".to_string();
+            } else if let Some(ref c) = client {
+                let our_pub = app.keypair.public_key_b64();
+                let msg = format!("[:rvIRC:SECURE:INIT:{}]", our_pub);
+                c.send_privmsg(&nick, &msg).map_err(|e| e.to_string())?;
+                app.pending_secure.insert(nick.clone());
+                if !app.dm_targets.contains(&nick) {
+                    app.dm_targets.push(nick.clone());
+                }
+                app.push_chat_log(&nick, &format!("*** ESTABLISHING SECURE CONNECTION WITH {} ***", nick));
+                app.push_chat_log(&nick, "Sending key exchange request...");
+                app.status_message = format!("Initiating secure session with {}...", nick);
+            } else {
+                app.status_message = "Not connected.".to_string();
+            }
+        }
+        R::Unsecure(nick_arg) => {
+            let nick = if nick_arg.is_empty() {
+                app.current_dm_nick().unwrap_or_default()
+            } else {
+                nick_arg
+            };
+            if nick.is_empty() {
+                app.status_message = "Usage: :unsecure <nick> (or use in a DM)".to_string();
+            } else if app.secure_sessions.remove(&nick).is_some() {
+                app.push_chat_log(&nick, "*** SECURE SESSION ENDED ***");
+                app.status_message = format!("Secure session with {} ended.", nick);
+            } else {
+                app.status_message = format!("No secure session with {}.", nick);
+            }
+        }
+        R::SendFile { nick: nick_arg, path } => {
+            let nick = if nick_arg.is_empty() {
+                app.current_dm_nick().unwrap_or_default()
+            } else {
+                nick_arg
+            };
+            if nick.is_empty() {
+                app.status_message = "Usage: :sendfile <nick> <path> (or use in a DM)".to_string();
+            } else if client.is_none() {
+                app.status_message = "Not connected.".to_string();
+            } else if path.is_empty() {
+                app.file_browser_visible = true;
+                app.file_browser_pending_filename = String::new();
+                app.file_browser_pending_code = String::new();
+                app.file_browser_pending_nick = nick;
+                let home = directories::BaseDirs::new()
+                    .map(|b| b.home_dir().to_path_buf())
+                    .unwrap_or_else(|| PathBuf::from("/"));
+                app.file_browser_path = home;
+                app.file_browser_mode = app::FileBrowserMode::SendFile;
+                app.refresh_file_browser();
+            } else {
+                let file_path = PathBuf::from(&path);
+                if !file_path.exists() {
+                    app.status_message = format!("File not found: {}", path);
+                } else {
+                    let tx = irc_tx.clone();
+                    let nick_clone = nick.clone();
+                    let file_name = file_path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path.clone());
+                    app.push_chat_log(&nick, &format!("Starting file send: {}", file_name));
+                    app.status_message = format!("Starting file send of {} to {}...", file_name, nick);
+                    rt.spawn(async move {
+                        match filetransfer::send_file(&file_path, nick_clone.clone(), tx.clone()).await {
+                            Ok(()) => {}
+                            Err(e) => {
+                                let _ = tx.send(IrcMessage::ChatLog {
+                                    target: nick_clone.clone(),
+                                    text: format!("File send failed: {}", e),
+                                });
+                                let _ = tx.send(IrcMessage::Status(format!(
+                                    "File send failed: {}", e
+                                )));
+                            }
+                        }
+                    });
+                }
+            }
+        }
         R::UserAction { .. } => {}
     }
     Ok(false)
@@ -1016,6 +1315,7 @@ fn complete_input(app: &mut App) {
         "msg", "me", "nick", "topic", "kick", "ban", "channel", "chan", "c",
         "channel-panel", "user-panel", "channels", "users",
         "version", "credits", "license",
+        "secure", "unsecure", "sendfile",
     ];
     let input = &app.input;
     let cursor = app.input_cursor.min(input.len());
@@ -1077,4 +1377,171 @@ fn restore_terminal() -> io::Result<()> {
     crossterm::terminal::disable_raw_mode()?;
     crossterm::execute!(io::stdout(), crossterm::terminal::LeaveAlternateScreen)?;
     Ok(())
+}
+
+/// Parse a [:rvIRC:...] protocol message into a ProtocolEvent.
+fn parse_rvirc_protocol(from_nick: &str, text: &str) -> Option<app::ProtocolEvent> {
+    use app::ProtocolEvent;
+    let inner = text.strip_prefix("[:rvIRC:")?;
+    let inner = inner.strip_suffix(']').unwrap_or(inner);
+
+    if let Some(rest) = inner.strip_prefix("SECURE:INIT:") {
+        return Some(ProtocolEvent::SecureInit {
+            from_nick: from_nick.to_string(),
+            pubkey_b64: rest.to_string(),
+        });
+    }
+    if let Some(rest) = inner.strip_prefix("SECURE:ACK:") {
+        return Some(ProtocolEvent::SecureAck {
+            from_nick: from_nick.to_string(),
+            pubkey_b64: rest.to_string(),
+        });
+    }
+    if let Some(rest) = inner.strip_prefix("ENC:") {
+        let mut parts = rest.splitn(2, ':');
+        let nonce = parts.next()?;
+        let ct = parts.next()?;
+        return Some(ProtocolEvent::Encrypted {
+            from_nick: from_nick.to_string(),
+            nonce_b64: nonce.to_string(),
+            ciphertext_b64: ct.to_string(),
+        });
+    }
+    if let Some(rest) = inner.strip_prefix("WORMHOLE:OFFER:") {
+        let parts: Vec<&str> = rest.splitn(3, ':').collect();
+        if parts.len() == 3 {
+            return Some(ProtocolEvent::WormholeOffer {
+                from_nick: from_nick.to_string(),
+                code: parts[0].to_string(),
+                filename: parts[1].to_string(),
+                size: parts[2].parse().unwrap_or(0),
+            });
+        }
+        return None;
+    }
+    if inner.starts_with("WORMHOLE:COMPLETE") {
+        return Some(ProtocolEvent::WormholeComplete {
+            from_nick: from_nick.to_string(),
+        });
+    }
+    if inner.starts_with("WORMHOLE:REJECT") {
+        return Some(ProtocolEvent::WormholeReject {
+            from_nick: from_nick.to_string(),
+        });
+    }
+    None
+}
+
+/// Process queued protocol events (called from main loop, has access to client).
+fn process_protocol_events(
+    app: &mut App,
+    client: &mut Option<Client>,
+    _rt: &tokio::runtime::Runtime,
+    _irc_tx: &IrcMessageTx,
+) {
+    use app::ProtocolEvent;
+    let events: Vec<ProtocolEvent> = app.protocol_events.drain(..).collect();
+    for evt in events {
+        match evt {
+            ProtocolEvent::SecureInit { from_nick, pubkey_b64 } => {
+                app.push_chat_log(&from_nick, &format!("*** {} REQUESTED SECURE CONNECTION ***", from_nick));
+                app.push_chat_log(&from_nick, "Performing key exchange...");
+                match SecureSession::from_exchange(&app.keypair.secret, &pubkey_b64) {
+                    Ok(session) => {
+                        app.secure_sessions.insert(from_nick.clone(), session);
+                        let our_pub = app.keypair.public_key_b64();
+                        if let Some(ref c) = client {
+                            let msg = format!("[:rvIRC:SECURE:ACK:{}]", our_pub);
+                            let _ = c.send_privmsg(&from_nick, &msg);
+                        }
+                        app.push_chat_log(&from_nick, "*** SECURE CONNECTION ESTABLISHED ***");
+                        app.push_chat_log(&from_nick, "Messages are now end-to-end encrypted (X25519 + ChaCha20-Poly1305).");
+                        app.status_message = format!("Secure session established with {}.", from_nick);
+                    }
+                    Err(e) => {
+                        app.push_chat_log(&from_nick, &format!("Secure handshake failed: {}", e));
+                        app.status_message = format!("Secure handshake from {} failed: {}", from_nick, e);
+                    }
+                }
+            }
+            ProtocolEvent::SecureAck { from_nick, pubkey_b64 } => {
+                if app.pending_secure.remove(&from_nick) {
+                    app.push_chat_log(&from_nick, "Key exchange response received...");
+                    match SecureSession::from_exchange(&app.keypair.secret, &pubkey_b64) {
+                        Ok(session) => {
+                            app.secure_sessions.insert(from_nick.clone(), session);
+                            app.push_chat_log(&from_nick, "*** SECURE CONNECTION ESTABLISHED ***");
+                            app.push_chat_log(&from_nick, "Messages are now end-to-end encrypted (X25519 + ChaCha20-Poly1305).");
+                            app.status_message = format!("Secure session established with {}.", from_nick);
+                        }
+                        Err(e) => {
+                            app.push_chat_log(&from_nick, &format!("Secure handshake failed: {}", e));
+                            app.status_message = format!("Secure handshake with {} failed: {}", from_nick, e);
+                        }
+                    }
+                }
+            }
+            ProtocolEvent::Encrypted { from_nick, nonce_b64, ciphertext_b64 } => {
+                if let Some(session) = app.secure_sessions.get(&from_nick) {
+                    match session.decrypt(&nonce_b64, &ciphertext_b64) {
+                        Ok(plaintext) => {
+                            app.push_message(
+                                &from_nick,
+                                MessageLine {
+                                    source: from_nick.clone(),
+                                    text: plaintext,
+                                    kind: MessageKind::Privmsg,
+                                },
+                            );
+                        }
+                        Err(e) => {
+                            app.push_message(
+                                &from_nick,
+                                MessageLine {
+                                    source: "rvIRC".to_string(),
+                                    text: format!("[decrypt error: {}]", e),
+                                    kind: MessageKind::Other,
+                                },
+                            );
+                        }
+                    }
+                } else {
+                    app.push_message(
+                        &from_nick,
+                        MessageLine {
+                            source: from_nick.clone(),
+                            text: "[encrypted message, no secure session]".to_string(),
+                            kind: MessageKind::Other,
+                        },
+                    );
+                }
+            }
+            ProtocolEvent::WormholeOffer { from_nick, code, filename, size } => {
+                let size_display = if size >= 1_048_576 {
+                    format!("{:.1} MB", size as f64 / 1_048_576.0)
+                } else if size >= 1024 {
+                    format!("{:.1} KB", size as f64 / 1024.0)
+                } else {
+                    format!("{} B", size)
+                };
+                app.push_chat_log(&from_nick, &format!(
+                    "*** {} wants to send you {} ({}) ***",
+                    from_nick, filename, size_display
+                ));
+                app.file_receive_popup_visible = true;
+                app.file_receive_nick = from_nick;
+                app.file_receive_filename = filename;
+                app.file_receive_size = size;
+                app.file_receive_code = code;
+            }
+            ProtocolEvent::WormholeComplete { from_nick } => {
+                app.push_chat_log(&from_nick, "*** File transfer completed. ***");
+                app.status_message = format!("File transfer to {} completed.", from_nick);
+            }
+            ProtocolEvent::WormholeReject { from_nick } => {
+                app.push_chat_log(&from_nick, "*** File transfer rejected. ***");
+                app.status_message = format!("{} rejected the file transfer.", from_nick);
+            }
+        }
+    }
 }
