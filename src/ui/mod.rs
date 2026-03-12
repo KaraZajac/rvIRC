@@ -5,11 +5,11 @@ mod layout;
 use crate::app::{App, MessageKind, MessageLine, Mode, PanelFocus, UserAction};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 use ratatui_image::StatefulImage;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const CHANNELS_PANE_WIDTH: u16 = 22;
 const USERS_PANE_WIDTH: u16 = 18;
@@ -112,6 +112,32 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 }
 
 const IMAGE_DISPLAY_HEIGHT: u16 = 12;
+
+/// Break a string at character boundaries so no line exceeds max_width display columns.
+fn wrap_str_at_width(s: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return vec![s.to_string()];
+    }
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut w: usize = 0;
+    for ch in s.chars() {
+        let cw = ch.width().unwrap_or(1);
+        if w + cw > max_width && !current.is_empty() {
+            segments.push(std::mem::take(&mut current));
+            w = 0;
+        }
+        current.push(ch);
+        w += cw;
+    }
+    if !current.is_empty() {
+        segments.push(current);
+    }
+    if segments.is_empty() && !s.is_empty() {
+        segments.push(s.to_string());
+    }
+    segments
+}
 
 fn message_wrapped_height(m: &MessageLine, _current_nick: Option<&str>, width: u16) -> u16 {
     if width == 0 {
@@ -253,10 +279,10 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
         let m = &messages[i];
         let text_h = message_wrapped_height(m, nick.as_deref(), inner.width);
         let avail_text_h = text_h.min(max_y.saturating_sub(cur_y));
-        let line = format_message_line(m, nick.as_deref());
+        let content = format_message_line_wrapped(m, nick.as_deref(), inner.width);
         let text_rect = Rect { x: inner.x, y: cur_y, width: inner.width, height: avail_text_h };
         f.render_widget(
-            Paragraph::new(line).wrap(Wrap { trim: true }),
+            Paragraph::new(content).wrap(Wrap { trim: true }),
             text_rect,
         );
         cur_y += avail_text_h;
@@ -283,7 +309,12 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-fn format_message_line<'a>(m: &'a MessageLine, current_nick: Option<&str>) -> Line<'a> {
+/// Format a message line with styling, pre-wrapped at character boundaries so long words/URLs wrap.
+fn format_message_line_wrapped(
+    m: &MessageLine,
+    current_nick: Option<&str>,
+    width: u16,
+) -> Text<'static> {
     let mention = current_nick.map_or(false, |nick| {
         !nick.is_empty() && m.text.to_lowercase().contains(&nick.to_lowercase())
     });
@@ -304,10 +335,26 @@ fn format_message_line<'a>(m: &'a MessageLine, current_nick: Option<&str>) -> Li
         MessageKind::Mode => (format!("*** "), Style::default().fg(Color::Green)),
         MessageKind::Other => (format!("{} ", m.source), Style::default()),
     };
-    Line::from(vec![
-        Span::styled(prefix, style),
-        Span::styled(m.text.as_str(), Style::default()),
-    ])
+    let full = format!("{}{}", prefix, m.text);
+    let w = width as usize;
+    let segments = wrap_str_at_width(&full, w);
+    let default_style = Style::default();
+    let lines: Vec<Line> = segments
+        .iter()
+        .enumerate()
+        .map(|(i, seg)| {
+            if i == 0 && seg.len() >= prefix.len() && seg.starts_with(prefix.as_str()) {
+                let rest = seg[prefix.len()..].to_string();
+                Line::from(vec![
+                    Span::styled(prefix.clone(), style),
+                    Span::styled(rest, default_style),
+                ])
+            } else {
+                Line::from(Span::styled(seg.clone(), default_style))
+            }
+        })
+        .collect();
+    Text::from(lines)
 }
 
 fn draw_input_bar(f: &mut Frame, area: Rect, app: &App) {
