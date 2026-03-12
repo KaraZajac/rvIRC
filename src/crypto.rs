@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::path::Path;
 use x25519_dalek::{PublicKey, StaticSecret};
+use zeroize::Zeroize;
 
 // ---------------------------------------------------------------------------
 // Keypair (identity + ephemeral)
@@ -88,12 +89,20 @@ pub struct SecureSession {
     send_cipher: ChaCha20Poly1305,
     recv_cipher: ChaCha20Poly1305,
     send_nonce_counter: u64,
+    /// Highest nonce counter value received so far (replay protection).
+    recv_nonce_max: u64,
     /// Raw DH shared secret, kept for SAS derivation.
     shared_secret: [u8; 32],
     /// Our identity public key (for SAS binding).
     pub our_identity_pub: [u8; 32],
     /// Their identity public key (for SAS binding).
     pub their_identity_pub: [u8; 32],
+}
+
+impl Drop for SecureSession {
+    fn drop(&mut self) {
+        self.shared_secret.zeroize();
+    }
 }
 
 impl SecureSession {
@@ -139,10 +148,14 @@ impl SecureSession {
         let recv_cipher = ChaCha20Poly1305::new_from_slice(&recv_key)
             .map_err(|e| format!("cipher init: {}", e))?;
 
+        send_key.zeroize();
+        recv_key.zeroize();
+
         Ok(Self {
             send_cipher,
             recv_cipher,
             send_nonce_counter: 0,
+            recv_nonce_max: 0,
             shared_secret: shared_bytes,
             our_identity_pub: *our_identity_pub.as_bytes(),
             their_identity_pub: their_identity_pub_bytes,
@@ -163,14 +176,22 @@ impl SecureSession {
         Ok((B64.encode(nonce_bytes), B64.encode(ciphertext)))
     }
 
-    pub fn decrypt(&self, nonce_b64: &str, ciphertext_b64: &str) -> Result<String, String> {
+    pub fn decrypt(&mut self, nonce_b64: &str, ciphertext_b64: &str) -> Result<String, String> {
         let nonce_bytes: [u8; 12] = B64
             .decode(nonce_b64)
             .map_err(|e| format!("bad nonce b64: {}", e))?
             .try_into()
             .map_err(|_| "nonce must be 12 bytes".to_string())?;
-        let nonce = Nonce::from(nonce_bytes);
 
+        // Extract counter from nonce bytes [4..12] and enforce monotonic ordering
+        let mut counter_bytes = [0u8; 8];
+        counter_bytes.copy_from_slice(&nonce_bytes[4..12]);
+        let counter = u64::from_be_bytes(counter_bytes);
+        if counter <= self.recv_nonce_max {
+            return Err("replayed or out-of-order message (nonce not increasing)".to_string());
+        }
+
+        let nonce = Nonce::from(nonce_bytes);
         let ciphertext = B64
             .decode(ciphertext_b64)
             .map_err(|e| format!("bad ciphertext b64: {}", e))?;
@@ -180,15 +201,25 @@ impl SecureSession {
             .decrypt(&nonce, ciphertext.as_ref())
             .map_err(|_| "decryption failed (wrong key or tampered)".to_string())?;
 
+        self.recv_nonce_max = counter;
+
         String::from_utf8(plaintext).map_err(|e| format!("invalid UTF-8: {}", e))
     }
 
     /// Derive a 6-word SAS code bound to the shared secret and both identity keys.
+    /// Uses canonical (lexicographic) ordering of identity keys so both sides
+    /// produce the same code.
     pub fn sas_words(&self) -> Vec<&'static str> {
+        let (first, second) = if self.our_identity_pub <= self.their_identity_pub {
+            (&self.our_identity_pub, &self.their_identity_pub)
+        } else {
+            (&self.their_identity_pub, &self.our_identity_pub)
+        };
+
         let mut material = Vec::with_capacity(96);
         material.extend_from_slice(&self.shared_secret);
-        material.extend_from_slice(&self.our_identity_pub);
-        material.extend_from_slice(&self.their_identity_pub);
+        material.extend_from_slice(first);
+        material.extend_from_slice(second);
 
         let hk = Hkdf::<Sha256>::new(None, &material);
         let mut sas_bytes = [0u8; 6];
@@ -365,5 +396,5 @@ const SAS_WORDLIST: [&str; 256] = [
     "wander", "wave", "willow", "window", "winter", "wolf", "wreath", "xenon",
     "yacht", "yarn", "yellow", "zenith", "zephyr", "zinc", "zodiac", "alpine",
     "amber", "arctic", "azure", "basalt", "birch", "bison", "bliss", "brave",
-    "brook", "calm", "cedar", "charm", "cider", "clover", "dawn", "dream",
+    "brook", "calm", "compass", "charm", "cider", "clover", "dune", "dream",
 ];

@@ -1231,6 +1231,10 @@ fn run_command(
                 if !app.dm_targets.contains(&nick) {
                     app.dm_targets.push(nick.clone());
                 }
+                app.current_channel = Some(nick.clone());
+                app.mark_target_read(&nick);
+                app.sync_channel_index_to_current();
+                app.message_scroll_offset = 0;
                 app.status_message = format!("Message sent to {}", nick);
             }
         }
@@ -1454,8 +1458,9 @@ fn run_command(
             } else if let Some(session) = app.secure_sessions.get(&nick) {
                 let words = session.sas_words();
                 let code = words.join(" ");
-                app.push_chat_log(&nick, &format!("Verification code with {}: {}", nick, code));
-                app.push_chat_log(&nick, "Compare this code with your peer out-of-band. If it matches, run :verified");
+                app.push_chat_log(&nick, &format!("*** Verification code with {}: {} ***", nick, code));
+                app.push_chat_log(&nick, "Both sides must run :verify -- ask your peer to run it too.");
+                app.push_chat_log(&nick, "Compare the 6 words out-of-band (voice, in person, etc). If they match, run :verified");
                 app.status_message = format!("SAS: {}", code);
             } else {
                 app.status_message = format!("No secure session with {}.", nick);
@@ -1788,7 +1793,7 @@ fn process_protocol_events(
                 }
             }
             ProtocolEvent::Encrypted { from_nick, nonce_b64, ciphertext_b64 } => {
-                if let Some(session) = app.secure_sessions.get(&from_nick) {
+                if let Some(session) = app.secure_sessions.get_mut(&from_nick) {
                     match session.decrypt(&nonce_b64, &ciphertext_b64) {
                         Ok(plaintext) => {
                             let mut line = MessageLine {

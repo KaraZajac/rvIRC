@@ -2888,6 +2888,7 @@ dependencies = [
  "unicode-width 0.1.14",
  "ureq",
  "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
