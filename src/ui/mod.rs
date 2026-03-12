@@ -174,22 +174,32 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
 
     let mut header_height: u16 = 0;
     if let Some(topic) = app.current_topic() {
-        let line = Line::from(Span::styled(
-            format!(" Topic: {} ", topic),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM),
-        ));
-        let r = Rect { x: inner.x, y: inner.y + header_height, width: inner.width, height: 1 };
-        f.render_widget(Paragraph::new(line), r);
-        header_height += 1;
+        let topic_text = format!(" Topic: {} ", topic);
+        let segments = wrap_str_at_width(&topic_text, inner.width as usize);
+        let topic_h = segments.len().min(inner.height.saturating_sub(header_height) as usize) as u16;
+        let style = Style::default().fg(Color::Cyan).add_modifier(Modifier::DIM);
+        let lines: Vec<Line> = segments
+            .iter()
+            .take(topic_h as usize)
+            .map(|s| Line::from(Span::styled(s.clone(), style)))
+            .collect();
+        let r = Rect { x: inner.x, y: inner.y + header_height, width: inner.width, height: topic_h };
+        f.render_widget(Paragraph::new(Text::from(lines)), r);
+        header_height += topic_h;
     }
     if let Some(modes) = app.current_modes() {
-        let line = Line::from(Span::styled(
-            format!(" Modes: {} ", modes),
-            Style::default().fg(Color::Green).add_modifier(Modifier::DIM),
-        ));
-        let r = Rect { x: inner.x, y: inner.y + header_height, width: inner.width, height: 1 };
-        f.render_widget(Paragraph::new(line), r);
-        header_height += 1;
+        let modes_text = format!(" Modes: {} ", modes);
+        let segments = wrap_str_at_width(&modes_text, inner.width as usize);
+        let modes_h = segments.len().min(inner.height.saturating_sub(header_height) as usize) as u16;
+        let style = Style::default().fg(Color::Green).add_modifier(Modifier::DIM);
+        let lines: Vec<Line> = segments
+            .iter()
+            .take(modes_h as usize)
+            .map(|s| Line::from(Span::styled(s.clone(), style)))
+            .collect();
+        let r = Rect { x: inner.x, y: inner.y + header_height, width: inner.width, height: modes_h };
+        f.render_widget(Paragraph::new(Text::from(lines)), r);
+        header_height += modes_h;
     }
 
     let content_y = inner.y + header_height;
