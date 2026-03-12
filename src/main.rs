@@ -861,6 +861,9 @@ fn handle_key_action(
                     app.push_chat_log(&nick, &format!("Key fingerprint: {}", fp));
                     app.push_chat_log(&nick, "*** SECURE CONNECTION ESTABLISHED ***");
                     app.push_chat_log(&nick, "Messages are now end-to-end encrypted (X25519 + ChaCha20-Poly1305).");
+                    if !app.known_keys.is_verified(&nick, &server) {
+                        app.push_chat_log(&nick, "Use :verify to compare verification codes.");
+                    }
                     app.status_message = format!("Secure session established with {}.", nick);
                 }
                 Err(e) => {
@@ -1673,7 +1676,7 @@ fn parse_rvirc_protocol(from_nick: &str, text: &str) -> Option<app::ProtocolEven
 /// Process queued protocol events (called from main loop, has access to client).
 fn process_protocol_events(
     app: &mut App,
-    _client: &mut Option<Client>,
+    client: &mut Option<Client>,
     rt: &tokio::runtime::Runtime,
     irc_tx: &IrcMessageTx,
 ) {
@@ -1782,7 +1785,9 @@ fn process_protocol_events(
                             app.push_chat_log(&from_nick, &format!("Key fingerprint: {}", fp));
                             app.push_chat_log(&from_nick, "*** SECURE CONNECTION ESTABLISHED ***");
                             app.push_chat_log(&from_nick, "Messages are now end-to-end encrypted (X25519 + ChaCha20-Poly1305).");
-                            app.push_chat_log(&from_nick, "Use :verify to compare verification codes.");
+                            if !app.known_keys.is_verified(&from_nick, &server) {
+                                app.push_chat_log(&from_nick, "Use :verify to compare verification codes.");
+                            }
                             app.status_message = format!("Secure session established with {}.", from_nick);
                         }
                         Err(e) => {
@@ -1854,6 +1859,28 @@ fn process_protocol_events(
                         }
                     }
                 } else {
+                    // No session: if we know this peer (TOFU), auto-initiate re-secure once
+                    let server = app.current_server.as_deref().unwrap_or("unknown");
+                    let known = app.known_keys.lookup(&from_nick, server).is_some();
+                    let already_pending = app.pending_secure.contains(&from_nick);
+
+                    if known && !already_pending {
+                        if let Some(ref c) = client {
+                            let ephemeral = crypto::Keypair::generate();
+                            let ephemeral_pub_b64 = ephemeral.public_key_b64();
+                            let identity_pub_b64 = app.keypair.public_key_b64();
+                            let msg = format!("[:rvIRC:SECURE:INIT:{}:{}]", ephemeral_pub_b64, identity_pub_b64);
+                            if c.send_privmsg(&from_nick, &msg).is_ok() {
+                                app.pending_secure.insert(from_nick.clone());
+                                app.pending_secure_ephemeral.insert(from_nick.clone(), ephemeral);
+                                if !app.dm_targets.contains(&from_nick) {
+                                    app.dm_targets.push(from_nick.clone());
+                                }
+                                app.push_chat_log(&from_nick, "*** No secure session. Sending key exchange to re-establish... ***");
+                            }
+                        }
+                    }
+
                     app.push_message(
                         &from_nick,
                         MessageLine {
