@@ -113,10 +113,10 @@ User actions: **Kick** and **Ban** perform the IRC command (current channel). **
 
 ## Config
 
-Config path: `~/.config/rvIRC/config.toml`. If missing, the app creates the directory and a default config. The same directory also stores:
+Config path: `~/.config/rvIRC/config.toml`. If missing, the app creates the directory and a default config with 0600 permissions on Unix. **Security**: config.toml can contain `identify_password` and server `password` — ensure it is not world-readable (e.g. `chmod 600 ~/.config/rvIRC/config.toml`). The same directory also stores:
 
 - `identity.toml` — Your persistent X25519 identity keypair (auto-generated on first launch, 0600 permissions on Unix).
-- `known_keys.toml` — TOFU key store tracking peer identity keys, verification status, and timestamps.
+- `known_keys.toml` — TOFU key store tracking peer identity keys, verification status, and timestamps (0600 on Unix).
 
 ```toml
 username = "myuser"
@@ -175,6 +175,7 @@ rvIRC supports end-to-end encrypted direct messages between rvIRC clients. This 
 - **Directional keys**: The DH shared secret is expanded via HKDF-SHA256 into two independent keys (`rvIRC-dm-init` and `rvIRC-dm-resp`), assigned based on lexicographic ordering of the ephemeral public keys. Each side uses a different key to send, preventing (key, nonce) reuse.
 - **TOFU**: Peer identity keys are recorded in `~/.config/rvIRC/known_keys.toml` with nick, server, fingerprint, verification status, and timestamps. On subsequent sessions, the client checks if the key matches. If it changed, a red warning is displayed and (for ACK) the handshake is blocked.
 - **SAS verification**: `:verify` derives a 6-word Short Authenticated String from the shared DH secret + both identity public keys using HKDF. Both users should see the same 6 words if there is no MITM. After out-of-band comparison, run `:verified` to mark the peer as trusted in `known_keys.toml`.
+- **Replay protection**: Received messages must arrive in strict order (monotonic nonce). Out-of-order IRC delivery (e.g. network splits, relays) can cause legitimate messages to be rejected. If you see repeated decrypt failures, run `:secure` again to re-key the session.
 
 The key exchange and encrypted messages use `[:rvIRC:]`-prefixed protocol messages that are intercepted and never displayed to the user. Inline image display works in encrypted DMs as well.
 

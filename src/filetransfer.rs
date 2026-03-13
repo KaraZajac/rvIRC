@@ -35,7 +35,7 @@ pub async fn send_file(
     let code = mailbox.code().to_string();
 
     let offer = format!("[:rvIRC:WORMHOLE:OFFER:{}:{}:{}]", code, file_name, file_size);
-    let _ = tx.send(IrcMessage::SendPrivmsg {
+    let _ = tx.send(IrcMessage::SendPrivmsgOrEncrypt {
         target: nick.clone(),
         text: offer,
     });

@@ -2887,6 +2887,7 @@ dependencies = [
  "toml 0.8.23",
  "unicode-width 0.1.14",
  "ureq",
+ "url",
  "x25519-dalek",
  "zeroize",
 ]

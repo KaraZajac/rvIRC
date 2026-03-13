@@ -91,18 +91,14 @@ pub struct SecureSession {
     send_nonce_counter: u64,
     /// Highest nonce counter value received so far (replay protection).
     recv_nonce_max: u64,
-    /// Raw DH shared secret, kept for SAS derivation.
-    shared_secret: [u8; 32],
-    /// Our identity public key (for SAS binding).
+    /// Pre-computed SAS words (derived at session creation; shared_secret zeroized after).
+    sas_words: Vec<&'static str>,
+    /// Our identity public key (for display/fingerprint).
+    #[allow(dead_code)]
     pub our_identity_pub: [u8; 32],
-    /// Their identity public key (for SAS binding).
+    /// Their identity public key (for display/fingerprint).
+    #[allow(dead_code)]
     pub their_identity_pub: [u8; 32],
-}
-
-impl Drop for SecureSession {
-    fn drop(&mut self) {
-        self.shared_secret.zeroize();
-    }
 }
 
 impl SecureSession {
@@ -122,11 +118,27 @@ impl SecureSession {
             .map_err(|_| "public key must be 32 bytes".to_string())?;
         let their_public = PublicKey::from(their_bytes);
         let shared = our_ephemeral_secret.diffie_hellman(&their_public);
-        let shared_bytes: [u8; 32] = *shared.as_bytes();
+        let mut shared_bytes: [u8; 32] = *shared.as_bytes();
 
-        let hk = Hkdf::<Sha256>::new(None, &shared_bytes);
+        let our_identity_bytes = our_identity_pub.as_bytes();
+        let (first_id, second_id) = if our_identity_bytes <= &their_identity_pub_bytes {
+            (our_identity_bytes as &[u8], their_identity_pub_bytes.as_slice())
+        } else {
+            (their_identity_pub_bytes.as_slice(), our_identity_bytes as &[u8])
+        };
+
+        let mut ikm = Vec::with_capacity(96);
+        ikm.extend_from_slice(&shared_bytes);
+        ikm.extend_from_slice(first_id);
+        ikm.extend_from_slice(second_id);
+
+        let hk = Hkdf::<Sha256>::new(Some(b"rvIRC-dm-v1"), &ikm);
 
         let our_bytes = *our_ephemeral_public.as_bytes();
+        if our_bytes == their_bytes {
+            shared_bytes.zeroize();
+            return Err("ephemeral keys equal (abort handshake)".to_string());
+        }
         let we_are_lower = our_bytes < their_bytes;
 
         let (send_info, recv_info) = if we_are_lower {
@@ -151,12 +163,26 @@ impl SecureSession {
         send_key.zeroize();
         recv_key.zeroize();
 
+        let mut sas_material = Vec::with_capacity(96);
+        sas_material.extend_from_slice(&shared_bytes);
+        sas_material.extend_from_slice(first_id);
+        sas_material.extend_from_slice(second_id);
+        shared_bytes.zeroize();
+
+        let sas_hk = Hkdf::<Sha256>::new(Some(b"rvIRC-sas-v1"), &sas_material);
+        let mut sas_bytes = [0u8; 6];
+        sas_hk
+            .expand(b"rvIRC-sas-verify", &mut sas_bytes)
+            .map_err(|_| "HKDF SAS expand failed".to_string())?;
+        let sas_words: Vec<&'static str> =
+            sas_bytes.iter().map(|b| SAS_WORDLIST[*b as usize]).collect();
+
         Ok(Self {
             send_cipher,
             recv_cipher,
             send_nonce_counter: 0,
             recv_nonce_max: 0,
-            shared_secret: shared_bytes,
+            sas_words,
             our_identity_pub: *our_identity_pub.as_bytes(),
             their_identity_pub: their_identity_pub_bytes,
         })
@@ -206,27 +232,9 @@ impl SecureSession {
         String::from_utf8(plaintext).map_err(|e| format!("invalid UTF-8: {}", e))
     }
 
-    /// Derive a 6-word SAS code bound to the shared secret and both identity keys.
-    /// Uses canonical (lexicographic) ordering of identity keys so both sides
-    /// produce the same code.
+    /// Return the pre-computed 6-word SAS code (derived at session creation).
     pub fn sas_words(&self) -> Vec<&'static str> {
-        let (first, second) = if self.our_identity_pub <= self.their_identity_pub {
-            (&self.our_identity_pub, &self.their_identity_pub)
-        } else {
-            (&self.their_identity_pub, &self.our_identity_pub)
-        };
-
-        let mut material = Vec::with_capacity(96);
-        material.extend_from_slice(&self.shared_secret);
-        material.extend_from_slice(first);
-        material.extend_from_slice(second);
-
-        let hk = Hkdf::<Sha256>::new(None, &material);
-        let mut sas_bytes = [0u8; 6];
-        hk.expand(b"rvIRC-sas-verify", &mut sas_bytes)
-            .expect("HKDF expand for SAS");
-
-        sas_bytes.iter().map(|b| SAS_WORDLIST[*b as usize]).collect()
+        self.sas_words.clone()
     }
 }
 
@@ -277,6 +285,12 @@ impl KnownKeys {
         }
         let s = toml::to_string_pretty(self).map_err(|e| e.to_string())?;
         std::fs::write(path, s).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            let _ = std::fs::set_permissions(path, perms);
+        }
         Ok(())
     }
 

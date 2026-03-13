@@ -130,6 +130,19 @@ fn main() -> Result<(), String> {
                         let _ = c.send_privmsg(target, text);
                     }
                 }
+                M::SendPrivmsgOrEncrypt { ref target, ref text } => {
+                    if let Some(ref c) = client {
+                        let wire = if let Some(session) = app.secure_sessions.get_mut(target) {
+                            match session.encrypt(text) {
+                                Ok((nonce, ct)) => format!("[:rvIRC:ENC:{}:{}]", nonce, ct),
+                                Err(_) => text.clone(),
+                            }
+                        } else {
+                            text.clone()
+                        };
+                        let _ = c.send_privmsg(target, &wire);
+                    }
+                }
                 M::Status(ref s) => {
                     app.status_message = s.clone();
                 }
@@ -381,7 +394,7 @@ fn apply_irc_message(
             app.last_invite = Some((nick.clone(), channel.clone()));
             app.status_message = format!("{} invited you to {} (use :join {} to join)", nick, channel, channel);
         }
-        M::NickInUse | M::CtcpRequest { .. } | M::SendPrivmsg { .. } | M::Status(_) | M::ChatLog { .. } | M::ImageReady { .. } | M::AnimatedImageReady { .. } | M::TransferProgress { .. } | M::TransferComplete { .. } => {}
+        M::NickInUse | M::CtcpRequest { .. } | M::SendPrivmsg { .. } | M::SendPrivmsgOrEncrypt { .. } | M::Status(_) | M::ChatLog { .. } | M::ImageReady { .. } | M::AnimatedImageReady { .. } | M::TransferProgress { .. } | M::TransferComplete { .. } => {}
         M::Connected { server } => {
             app.current_server = Some(server);
             app.status_message = "Connected.".to_string();
@@ -1698,12 +1711,45 @@ fn sanitize_received_filename(name: &str) -> String {
     }
 }
 
-/// Return true if the string is a safe http(s) URL for image fetch (no newlines, nulls, or control chars).
+/// Return true if the string is a safe http(s) URL for image fetch: no control chars, and host is
+/// not a private/local IP (SSRF mitigation).
 fn is_safe_image_url(s: &str) -> bool {
     if !s.starts_with("http://") && !s.starts_with("https://") {
         return false;
     }
-    !s.contains(|c: char| c == '\0' || c == '\n' || c == '\r' || c.is_control())
+    if s.contains(|c: char| c == '\0' || c == '\n' || c == '\r' || c.is_control()) {
+        return false;
+    }
+    let Ok(parsed) = url::Url::parse(s) else { return false };
+    let Some(host) = parsed.host_str() else { return false };
+    is_public_image_host(host)
+}
+
+/// Reject private, loopback, and link-local IPs to prevent SSRF and privacy leaks.
+fn is_public_image_host(host: &str) -> bool {
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return !is_private_or_local_ip(ip);
+    }
+    true
+}
+
+fn is_private_or_local_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            o[0] == 127
+                || o[0] == 10
+                || (o[0] == 172 && o[1] >= 16 && o[1] <= 31)
+                || (o[0] == 192 && o[1] == 168)
+                || (o[0] == 169 && o[1] == 254)
+        }
+        std::net::IpAddr::V6(v6) => {
+            let s = v6.segments();
+            s[0] == 0 && s[1] == 0 && s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0
+                && s[6] == 0 && s[7] == 1
+                || (s[0] & 0xffc0) == 0xfe80
+        }
+    }
 }
 
 fn extract_image_url(text: &str) -> Option<&str> {
@@ -1941,12 +1987,16 @@ fn process_protocol_events(
                         }
                     }
                 } else {
-                    // No session: if we know this peer (TOFU), auto-initiate re-secure once
+                    // No session: if we know this peer (TOFU), auto-initiate re-secure once per 60s
                     let server = app.current_server.as_deref().unwrap_or("unknown");
                     let known = app.known_keys.lookup(&from_nick, server).is_some();
                     let already_pending = app.pending_secure.contains(&from_nick);
+                    let rate_ok = app.last_auto_rekey.get(&from_nick).map_or(true, |t| {
+                        std::time::Instant::now().duration_since(*t) >= std::time::Duration::from_secs(60)
+                    });
 
-                    if known && !already_pending {
+                    if known && !already_pending && rate_ok {
+                        app.last_auto_rekey.insert(from_nick.clone(), std::time::Instant::now());
                         if let Some(ref c) = client {
                             let ephemeral = crypto::Keypair::generate();
                             let ephemeral_pub_b64 = ephemeral.public_key_b64();

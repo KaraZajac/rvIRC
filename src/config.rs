@@ -103,6 +103,12 @@ impl RvConfig {
             let default = Self::default_config();
             let toml = toml::to_string_pretty(&default).map_err(|e| e.to_string())?;
             std::fs::write(&path, toml).map_err(|e| e.to_string())?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let perms = std::fs::Permissions::from_mode(0o600);
+                let _ = std::fs::set_permissions(&path, perms);
+            }
             return Ok(default);
         }
         let s = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;

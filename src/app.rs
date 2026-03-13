@@ -160,6 +160,8 @@ pub struct App {
     pub secure_sessions: HashMap<String, SecureSession>,
     /// Nicks where we sent a SECURE:INIT and are waiting for ACK.
     pub pending_secure: HashSet<String>,
+    /// Last auto-rekey time per nick (rate limit: 60s).
+    pub last_auto_rekey: std::collections::HashMap<String, std::time::Instant>,
     /// Ephemeral keypairs generated per :secure initiation, keyed by nick.
     pub pending_secure_ephemeral: HashMap<String, Keypair>,
     /// TOFU known keys store.
@@ -299,6 +301,7 @@ impl App {
             keypair: Keypair::generate(),
             secure_sessions: HashMap::new(),
             pending_secure: HashSet::new(),
+            last_auto_rekey: HashMap::new(),
             pending_secure_ephemeral: HashMap::new(),
             known_keys: KnownKeys::default(),
             known_keys_path: None,

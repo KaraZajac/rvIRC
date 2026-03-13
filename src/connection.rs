@@ -35,6 +35,8 @@ pub enum IrcMessage {
     CtcpRequest { from_nick: String, target: String, tag: String, data: String },
     /// Send a PRIVMSG from an async task (e.g. wormhole code relay).
     SendPrivmsg { target: String, text: String },
+    /// Send to target, encrypting if a secure session exists (e.g. wormhole offer).
+    SendPrivmsgOrEncrypt { target: String, text: String },
     /// Status message from an async task.
     Status(String),
     /// In-chat log message (displayed as a system message in a DM/channel window).
