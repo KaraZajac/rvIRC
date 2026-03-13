@@ -586,8 +586,8 @@ fn draw_users_pane(f: &mut Frame, area: Rect, app: &App) {
 
 fn draw_friends_pane(f: &mut Frame, area: Rect, app: &App) {
     let show_selector = app.panel_focus == PanelFocus::Friends;
-    let items: Vec<ListItem> = app
-        .friends_list
+    let visible = app.visible_friends();
+    let items: Vec<ListItem> = visible
         .iter()
         .enumerate()
         .map(|(i, nick)| {
@@ -596,16 +596,17 @@ fn draw_friends_pane(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 "  "
             };
-            let online = app.friends_online.contains(nick);
-            let dot = if online {
-                Span::styled("\u{25CF} ", Style::default().fg(Color::Green))
+            let (online, away) = app.friend_status(nick);
+            let nick_color = if !online {
+                Color::Red
+            } else if away {
+                Color::Yellow
             } else {
-                Span::styled("\u{25CB} ", Style::default().fg(Color::DarkGray))
+                Color::Green
             };
             let line = Line::from(vec![
                 Span::raw(prefix),
-                dot,
-                Span::raw(nick),
+                Span::styled(nick, Style::default().fg(nick_color)),
                 Span::raw("  "),
             ]);
             ListItem::new(line)
@@ -614,7 +615,19 @@ fn draw_friends_pane(f: &mut Frame, area: Rect, app: &App) {
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(" Friends "))
         .style(Style::default());
-    f.render_widget(list, area);
+    let visible_height = area.height.saturating_sub(2) as usize;
+    let offset = if visible.len() <= visible_height {
+        0
+    } else {
+        (app.friends_index + 1)
+            .saturating_sub(visible_height)
+            .min(visible.len() - visible_height)
+            .max(0)
+    };
+    let mut state = ListState::default()
+        .with_selected(Some(app.friends_index))
+        .with_offset(offset);
+    f.render_stateful_widget(list, area, &mut state);
 }
 
 fn draw_user_action_menu(f: &mut Frame, app: &App, nick: &str) {

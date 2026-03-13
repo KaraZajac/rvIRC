@@ -34,6 +34,7 @@ fn main() -> Result<(), String> {
 
     let mut app = App::new();
     app.render_images = config.render_images;
+    app.offline_friends = config.offline_friends.clone();
     app.status_message = "Type :connect <server> to connect. :join #channel to join.".to_string();
 
     // Load persistent identity keypair (same directory as config.toml)
@@ -414,11 +415,24 @@ fn apply_irc_message(
         M::MonOffline { nicks } => {
             for n in nicks {
                 app.friends_online.remove(&n);
+                app.friends_away.remove(&n);
+            }
+            app.clamp_friends_index();
+        }
+        M::FriendAway { nick, away } => {
+            if app.friends_list.iter().any(|n| n.eq_ignore_ascii_case(&nick)) {
+                if let Some(existing) = app.friends_away.iter().find(|a| a.eq_ignore_ascii_case(&nick)).cloned() {
+                    app.friends_away.remove(&existing);
+                }
+                if away {
+                    app.friends_away.insert(nick);
+                }
             }
         }
         M::Connected { server } => {
             app.current_server = Some(server.clone());
             app.friends_online.clear();
+            app.friends_away.clear();
             if let Some(ref path) = app.friends_path {
                 app.friends_list = friends::load_friends(path, Some(&server));
                 app.friends_index = 0;
@@ -453,6 +467,7 @@ fn apply_irc_message(
             app.channel_modes.clear();
             app.last_invite = None;
             app.friends_online.clear();
+            app.friends_away.clear();
             app.away_message = None;
             app.status_message = "Disconnected.".to_string();
             if let Some(server) = server_for_reconnect {
@@ -537,7 +552,7 @@ fn handle_key_action(
             app.friends_index = app.friends_index.saturating_sub(1);
         }
         FriendDown => {
-            if app.friends_index + 1 < app.friends_list.len() {
+            if app.friends_index + 1 < app.visible_friends().len() {
                 app.friends_index += 1;
             }
         }
@@ -1710,9 +1725,7 @@ fn run_command(
             } else {
                 app.friends_list.push(nick.clone());
                 app.friends_list.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
-                if app.friends_index >= app.friends_list.len() && !app.friends_list.is_empty() {
-                    app.friends_index = app.friends_list.len() - 1;
-                }
+                app.clamp_friends_index();
                 if let Some(ref c) = client {
                     let _ = c.send(IrcCommand::MONITOR("+".to_string(), Some(nick.clone())));
                 }
@@ -1726,13 +1739,12 @@ fn run_command(
             let nick = nick.trim();
             if let Some(pos) = app.friends_list.iter().position(|n| n.eq_ignore_ascii_case(nick)) {
                 app.friends_list.remove(pos);
-                if app.friends_index >= app.friends_list.len() && app.friends_index > 0 {
-                    app.friends_index -= 1;
-                }
+                app.clamp_friends_index();
                 if let Some(ref c) = client {
                     let _ = c.send(IrcCommand::MONITOR("-".to_string(), Some(nick.to_string())));
                 }
                 app.friends_online.remove(nick);
+                app.friends_away.remove(nick);
                 if let Some(ref path) = app.friends_path {
                     let _ = crate::friends::save_friends(path, app.current_server.as_deref(), &app.friends_list);
                 }

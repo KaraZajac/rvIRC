@@ -4,6 +4,7 @@ use crate::app::{MessageKind, MessageLine};
 use crate::config::{RvConfig, ServerEntry};
 use irc::client::data::Config as IrcConfig;
 use irc::client::prelude::*;
+use irc::proto::caps::Capability;
 use irc::client::ClientStream;
 use irc::proto::{Command as IrcCommand, Response};
 use std::collections::HashMap;
@@ -63,6 +64,8 @@ pub enum IrcMessage {
     MonOnline { nicks: Vec<String> },
     /// MONITOR 731: nicks went offline.
     MonOffline { nicks: Vec<String> },
+    /// away-notify: nick set or cleared away status. away=true if away, false if back.
+    FriendAway { nick: String, away: bool },
 }
 
 fn server_entry_to_irc_config(entry: &ServerEntry, rv: &RvConfig) -> IrcConfig {
@@ -88,6 +91,7 @@ pub fn connect(
     let (client, stream) = rt
         .block_on(async {
             let mut client = Client::from_config(irc_config).await.map_err(|e| e.to_string())?;
+            let _ = client.send_cap_req(&[Capability::AwayNotify]);
             client.identify().map_err(|e| e.to_string())?;
             let stream = client.stream().map_err(|e| e.to_string())?;
             Ok::<_, String>((client, stream))
@@ -337,6 +341,13 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx) {
                             }
                         }
                     }
+                    C::AWAY(ref away_msg) => {
+                        let nick = prefix_nick(msg.prefix.as_ref());
+                        if !nick.is_empty() && nick != "*" {
+                            let away = away_msg.is_some();
+                            let _ = tx.send(IrcMessage::FriendAway { nick, away });
+                        }
+                    }
                     C::INVITE(ref _nick, ref channel) => {
                         let _ = tx.send(IrcMessage::Invite {
                             nick: prefix_nick(msg.prefix.as_ref()),
@@ -371,7 +382,8 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx) {
                 }
 
                 let should_skip_line = matches!(&msg.command, C::PRIVMSG(_, t) if parse_ctcp(t).is_some())
-                    || matches!(&msg.command, C::Response(_, _));
+                    || matches!(&msg.command, C::Response(_, _))
+                    || matches!(&msg.command, C::AWAY(_));
                 if !should_skip_line {
                     if let Some((target, line)) = message_line(&msg) {
                     let _ = tx.send(IrcMessage::Line {

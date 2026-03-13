@@ -104,6 +104,8 @@ pub struct App {
     pub friends_list: Vec<String>,
     /// Friends currently online (from RPL_MONONLINE/731).
     pub friends_online: HashSet<String>,
+    /// Friends currently away (from away-notify AWAY; only for friends in friends_list).
+    pub friends_away: HashSet<String>,
     /// Selection index within friends list.
     pub friends_index: usize,
     /// Path to friends.toml for saving.
@@ -242,6 +244,8 @@ pub struct App {
 
     /// Whether to fetch and render inline images for image URLs (from config).
     pub render_images: bool,
+    /// Whether to show offline friends: None/"show" = show (red), Some("hide") = hide.
+    pub offline_friends: Option<String>,
     pub next_image_id: usize,
     pub inline_images: HashMap<usize, InlineImage>,
 }
@@ -298,6 +302,7 @@ impl App {
             user_action_index: 0,
             friends_list: Vec::new(),
             friends_online: HashSet::new(),
+            friends_away: HashSet::new(),
             friends_index: 0,
             friends_path: None,
             panel_focus: PanelFocus::Main,
@@ -377,6 +382,7 @@ impl App {
             away_message: None,
 
             render_images: true,
+            offline_friends: None,
             next_image_id: 0,
             inline_images: HashMap::new(),
         }
@@ -699,14 +705,39 @@ impl App {
         }
     }
 
-    /// Clamp friends_index to valid range for friends_list.
+    /// Clamp friends_index to valid range for visible friends list.
     pub fn clamp_friends_index(&mut self) {
-        let len = self.friends_list.len();
+        let len = self.visible_friends().len();
         if len == 0 {
             self.friends_index = 0;
         } else {
             self.friends_index = self.friends_index.min(len - 1);
         }
+    }
+
+    /// Friends list filtered by offline_friends: hide = only online, show = all.
+    pub fn visible_friends(&self) -> Vec<String> {
+        let hide = self
+            .offline_friends
+            .as_deref()
+            .map(|s| s.eq_ignore_ascii_case("hide"))
+            .unwrap_or(false);
+        if hide {
+            self.friends_list
+                .iter()
+                .filter(|n| self.friends_online.iter().any(|o| o.eq_ignore_ascii_case(n)))
+                .cloned()
+                .collect()
+        } else {
+            self.friends_list.clone()
+        }
+    }
+
+    /// Friend status for display: (online, away).
+    pub fn friend_status(&self, nick: &str) -> (bool, bool) {
+        let online = self.friends_online.iter().any(|o| o.eq_ignore_ascii_case(nick));
+        let away = self.friends_away.iter().any(|a| a.eq_ignore_ascii_case(nick));
+        (online, away)
     }
 
     /// Set channel_index or messages_index to match current_channel (e.g. after Join or SwitchChannel).
@@ -724,9 +755,9 @@ impl App {
         }
     }
 
-    /// Selected friend from the friends pane.
+    /// Selected friend from the friends pane (from visible list).
     pub fn selected_friend(&self) -> Option<String> {
-        self.friends_list.get(self.friends_index).cloned()
+        self.visible_friends().get(self.friends_index).cloned()
     }
 }
 

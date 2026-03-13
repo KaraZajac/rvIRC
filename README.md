@@ -12,7 +12,8 @@
 
 - **Vim-style modes**: NORMAL, INSERT, COMMAND with distinct status bar colors (blue, green, orange).
 - **Commands**: `:connect`, `:servers`, `:join`, `:list`, `:part`, `:msg`, `:quit`, and more (see below).
-- **Panes**: Channels (left) and users (right). Toggle with `c` / `u`; j/k or arrows + Enter to switch channel or open user actions (DM, whois, etc.).
+- **Panes**: Channels and messages (left), users and friends (right). Toggle with `c` / `m` / `u` / `f`; j/k or arrows + Enter to switch channel, open DM, or run user actions (DM, whois, etc.).
+- **Friends list**: Track nicks with `:add-friend` / `:remove-friend`. Names are colored by status (green = online, yellow = away, red = offline). Uses IRC MONITOR and away-notify. Config `offline_friends = "hide"` omits offline friends.
 - **Config**: `~/.config/rvIRC/config.toml` — multiple servers, nickname, optional NickServ identify and auto-join. Connect order: connect → identify with NickServ (if set) → then auto-join channels.
 - **Auto-reconnect**: After an unexpected disconnect, the client retries up to 3 times (5s, 15s, 30s). Manual `:connect` or `:quit` cancels auto-reconnect.
 - **Encrypted DMs**: Two rvIRC clients can establish an end-to-end encrypted DM session using `:secure` (or `:secure <nick>`). Uses fresh ephemeral X25519 key exchange per session + ChaCha20-Poly1305 with directional keys (no nonce reuse). A green lock icon appears in the channel list next to secure sessions; a checkmark appears when the peer is verified. Incoming requests show an accept/reject popup. Persistent identity keys are stored in `~/.config/rvIRC/identity.toml`. Trust on First Use (TOFU) key tracking warns if a peer's identity key changes. Optional SAS verification via `:verify` / `:verified`.
@@ -58,6 +59,8 @@ Type `:` to enter COMMAND mode, then run any of these (case-insensitive):
 | `messages-panel show` / `hide` | Show or hide the messages pane (bottom left) |
 | `user-panel show` / `hide` | Show or hide the users pane (top right) |
 | `friends-panel show` / `hide` | Show or hide the friends pane (bottom right) |
+| `add-friend <nick>` | Add nick to friends list (MONITOR for online presence) |
+| `remove-friend <nick>` | Remove nick from friends list |
 | `channels` / `messages` / `users` / `friends` | Focus the corresponding pane |
 | `version` | Show version (1.0.0) in status bar |
 | `credits` | Show credits popup (author and GitHub link) |
@@ -119,6 +122,8 @@ User actions: **Kick**, **Ban**, **Unban**, **Op**, **Deop**, **Voice**, **Devoi
 
 ### Friends pane (when focused)
 
+Names are colored by status: green = online, yellow = away, red = offline. Uses IRC MONITOR for online presence and away-notify for away status. Config `offline_friends = "hide"` omits offline friends from the list.
+
 | Key | Action |
 |-----|--------|
 | `k` / `j` or ↑ / ↓ | Move selection |
@@ -153,6 +158,7 @@ nickname = "mynick"
 real_name = "My Name"
 # download_dir = "~/Downloads/"   # optional: default save directory for received files
 # render_images = true            # optional: set to false to disable inline image display (default: true)
+# offline_friends = "show"       # optional: "show" (red names) or "hide" — hide omits offline friends from the list (default: show)
 
 [[servers]]
 name = "Libera"

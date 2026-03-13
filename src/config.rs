@@ -18,6 +18,9 @@ pub struct RvConfig {
     /// Whether to fetch and display inline images for image URLs (default: true).
     #[serde(default = "default_render_images")]
     pub render_images: bool,
+    /// Whether to show offline friends in the list: "show" (red) or "hide" (default: show).
+    #[serde(default)]
+    pub offline_friends: Option<String>,
     #[serde(default)]
     pub servers: Vec<ServerEntry>,
 }
@@ -138,6 +141,7 @@ impl RvConfig {
             real_name: Some("rvIRC User".to_string()),
             download_dir: None,
             render_images: true,
+            offline_friends: None,
             servers: vec![
                 ServerEntry {
                     name: "Libera".to_string(),
