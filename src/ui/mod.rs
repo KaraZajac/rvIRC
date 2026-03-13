@@ -161,7 +161,8 @@ fn message_wrapped_height(m: &MessageLine, _current_nick: Option<&str>, width: u
         MessageKind::Mode => "*** ".to_string(),
         MessageKind::Other => format!("{} ", m.source),
     };
-    let full = format!("{}{}", prefix, m.text);
+    let stripped = crate::format::strip_irc_codes(&m.text);
+    let full = format!("{}{}", prefix, stripped);
     let w = width as usize;
     let display_width = full.width();
     ((display_width + w - 1) / w).max(1) as u16
@@ -330,6 +331,7 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 /// Format a message line with styling, pre-wrapped at character boundaries so long words/URLs wrap.
+/// Parses IRC formatting codes (bold, italic, color, etc.) for display.
 fn format_message_line_wrapped(
     m: &MessageLine,
     current_nick: Option<&str>,
@@ -338,7 +340,7 @@ fn format_message_line_wrapped(
     let mention = current_nick.map_or(false, |nick| {
         !nick.is_empty() && m.text.to_lowercase().contains(&nick.to_lowercase())
     });
-    let (prefix, style) = match m.kind {
+    let (prefix, prefix_style) = match m.kind {
         MessageKind::Privmsg => (
             format!("<{}> ", m.source),
             if mention {
@@ -355,25 +357,12 @@ fn format_message_line_wrapped(
         MessageKind::Mode => (format!("*** "), Style::default().fg(Color::Green)),
         MessageKind::Other => (format!("{} ", m.source), Style::default()),
     };
-    let full = format!("{}{}", prefix, m.text);
+    let prefix_span = Span::styled(prefix.clone(), prefix_style);
+    let msg_spans = crate::format::parse_irc_formatting(&m.text);
+    let mut all_spans = vec![prefix_span];
+    all_spans.extend(msg_spans);
     let w = width as usize;
-    let segments = wrap_str_at_width(&full, w);
-    let default_style = Style::default();
-    let lines: Vec<Line> = segments
-        .iter()
-        .enumerate()
-        .map(|(i, seg)| {
-            if i == 0 && seg.len() >= prefix.len() && seg.starts_with(prefix.as_str()) {
-                let rest = seg[prefix.len()..].to_string();
-                Line::from(vec![
-                    Span::styled(prefix.clone(), style),
-                    Span::styled(rest, default_style),
-                ])
-            } else {
-                Line::from(Span::styled(seg.clone(), default_style))
-            }
-        })
-        .collect();
+    let lines = crate::format::wrap_spans(&all_spans, w);
     Text::from(lines)
 }
 

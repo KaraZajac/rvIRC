@@ -7,6 +7,7 @@ mod connection;
 mod crypto;
 mod events;
 mod filetransfer;
+mod format;
 mod ui;
 
 use app::{App, MessageKind, MessageLine, Mode, PanelFocus, UserAction};
@@ -768,21 +769,22 @@ fn handle_key_action(
                     if target == "*server*" {
                         app.status_message = "Cannot send to server.".to_string();
                     } else if !text.is_empty() {
+                        let formatted = format::format_outgoing(&text);
                         if app.secure_sessions.contains_key(&target) {
                             let session = app.secure_sessions.get_mut(&target).unwrap();
-                            match session.encrypt(&text) {
+                            match session.encrypt(&formatted) {
                                 Ok((nonce, ct)) => {
                                     let wire = format!("[:rvIRC:ENC:{}:{}]", nonce, ct);
                                     c.send_privmsg(&target, &wire).map_err(|e| e.to_string())?;
-                                    push_self_message(app, &target, text, irc_tx, rt);
+                                    push_self_message(app, &target, formatted, irc_tx, rt);
                                 }
                                 Err(e) => {
                                     app.status_message = format!("Encrypt error: {}", e);
                                 }
                             }
                         } else {
-                            c.send_privmsg(&target, &text).map_err(|e| e.to_string())?;
-                            push_self_message(app, &target, text, irc_tx, rt);
+                            c.send_privmsg(&target, &formatted).map_err(|e| e.to_string())?;
+                            push_self_message(app, &target, formatted, irc_tx, rt);
                         }
                     }
                 } else {
@@ -1203,21 +1205,22 @@ fn run_command(
         R::Msg { nick, text } => {
             if let Some(ref c) = client {
                 if !text.is_empty() {
+                    let formatted = format::format_outgoing(&text);
                     if app.secure_sessions.contains_key(&nick) {
                         let session = app.secure_sessions.get_mut(&nick).unwrap();
-                        match session.encrypt(&text) {
+                        match session.encrypt(&formatted) {
                             Ok((nonce, ct)) => {
                                 let wire = format!("[:rvIRC:ENC:{}:{}]", nonce, ct);
                                 c.send_privmsg(&nick, &wire).map_err(|e| e.to_string())?;
-                                push_self_message(app, &nick, text.clone(), irc_tx, rt);
+                                push_self_message(app, &nick, formatted, irc_tx, rt);
                             }
                             Err(e) => {
                                 app.status_message = format!("Encrypt error: {}", e);
                             }
                         }
                     } else {
-                        c.send_privmsg(&nick, &text).map_err(|e| e.to_string())?;
-                        push_self_message(app, &nick, text.clone(), irc_tx, rt);
+                        c.send_privmsg(&nick, &formatted).map_err(|e| e.to_string())?;
+                        push_self_message(app, &nick, formatted, irc_tx, rt);
                     }
                 }
                 if !app.dm_targets.contains(&nick) {
