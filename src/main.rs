@@ -763,8 +763,7 @@ fn handle_key_action(
                                 Ok((nonce, ct)) => {
                                     let wire = format!("[:rvIRC:ENC:{}:{}]", nonce, ct);
                                     c.send_privmsg(&target, &wire).map_err(|e| e.to_string())?;
-                                    let nick = app.current_nickname.clone().unwrap_or_else(|| "?".to_string());
-                                    app.push_message(&target, MessageLine { source: nick, text, kind: MessageKind::Privmsg, image_id: None });
+                                    push_self_message(app, &target, text, irc_tx, rt);
                                 }
                                 Err(e) => {
                                     app.status_message = format!("Encrypt error: {}", e);
@@ -772,8 +771,7 @@ fn handle_key_action(
                             }
                         } else {
                             c.send_privmsg(&target, &text).map_err(|e| e.to_string())?;
-                            let nick = app.current_nickname.clone().unwrap_or_else(|| "?".to_string());
-                            app.push_message(&target, MessageLine { source: nick, text, kind: MessageKind::Privmsg, image_id: None });
+                            push_self_message(app, &target, text, irc_tx, rt);
                         }
                     }
                 } else {
@@ -1200,8 +1198,7 @@ fn run_command(
                             Ok((nonce, ct)) => {
                                 let wire = format!("[:rvIRC:ENC:{}:{}]", nonce, ct);
                                 c.send_privmsg(&nick, &wire).map_err(|e| e.to_string())?;
-                                let our_nick = app.current_nickname.clone().unwrap_or_else(|| "?".to_string());
-                                app.push_message(&nick, MessageLine { source: our_nick, text: text.clone(), kind: MessageKind::Privmsg, image_id: None });
+                                push_self_message(app, &nick, text.clone(), irc_tx, rt);
                             }
                             Err(e) => {
                                 app.status_message = format!("Encrypt error: {}", e);
@@ -1209,8 +1206,7 @@ fn run_command(
                         }
                     } else {
                         c.send_privmsg(&nick, &text).map_err(|e| e.to_string())?;
-                        let our_nick = app.current_nickname.clone().unwrap_or_else(|| "?".to_string());
-                        app.push_message(&nick, MessageLine { source: our_nick, text: text.clone(), kind: MessageKind::Privmsg, image_id: None });
+                        push_self_message(app, &nick, text.clone(), irc_tx, rt);
                     }
                 }
                 if !app.dm_targets.contains(&nick) {
@@ -1551,6 +1547,27 @@ fn restore_terminal() -> io::Result<()> {
 
 const IMAGE_EXTS: &[&str] = &[".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"];
 const MAX_GIF_FRAMES: usize = 100;
+
+/// Push a self-sent message to the chat log and spawn image download if the text
+/// contains an image URL. Sender sees their own images inline.
+fn push_self_message(
+    app: &mut App,
+    target: &str,
+    text: String,
+    irc_tx: &IrcMessageTx,
+    rt: &tokio::runtime::Runtime,
+) {
+    let nick = app.current_nickname.clone().unwrap_or_else(|| "?".to_string());
+    let mut line = MessageLine { source: nick, text, kind: MessageKind::Privmsg, image_id: None };
+    if app.render_images {
+        if let Some(url) = extract_image_url(&line.text) {
+            line.image_id = Some(app.next_image_id);
+            app.next_image_id += 1;
+            spawn_image_download(url, line.image_id.unwrap(), irc_tx, rt);
+        }
+    }
+    app.push_message(target, line);
+}
 
 /// Spawn a background task to download an image URL, decode it, and send the
 /// result back via the IRC message channel. Detects animated GIFs and extracts
