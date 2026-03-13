@@ -161,7 +161,7 @@ fn message_wrapped_height(m: &MessageLine, _current_nick: Option<&str>, width: u
         MessageKind::Mode => "*** ".to_string(),
         MessageKind::Other => format!("{} ", m.source),
     };
-    let stripped = crate::format::strip_irc_codes(&m.text);
+    let stripped = crate::format::strip_for_display_width(&m.text);
     let full = format!("{}{}", prefix, stripped);
     let w = width as usize;
     let display_width = full.width();
@@ -296,9 +296,10 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
             break;
         }
         let m = &messages[i];
+        let phase = std::time::Instant::now().duration_since(app.created_at).as_millis() as u64 / 100;
         let text_h = message_wrapped_height(m, nick.as_deref(), inner.width);
         let avail_text_h = text_h.min(max_y.saturating_sub(cur_y));
-        let content = format_message_line_wrapped(m, nick.as_deref(), inner.width);
+        let content = format_message_line_wrapped(m, nick.as_deref(), inner.width, phase);
         let text_rect = Rect { x: inner.x, y: cur_y, width: inner.width, height: avail_text_h };
         f.render_widget(
             Paragraph::new(content).wrap(Wrap { trim: true }),
@@ -336,6 +337,7 @@ fn format_message_line_wrapped(
     m: &MessageLine,
     current_nick: Option<&str>,
     width: u16,
+    rainbow_phase: u64,
 ) -> Text<'static> {
     let mention = current_nick.map_or(false, |nick| {
         !nick.is_empty() && m.text.to_lowercase().contains(&nick.to_lowercase())
@@ -358,7 +360,8 @@ fn format_message_line_wrapped(
         MessageKind::Other => (format!("{} ", m.source), Style::default()),
     };
     let prefix_span = Span::styled(prefix.clone(), prefix_style);
-    let msg_spans = crate::format::parse_irc_formatting(&m.text);
+    // @@...@@ = rvIRC rainbow (animated); other text via format_outgoing + parse_irc_formatting
+    let msg_spans = crate::format::parse_message_with_rainbow(&m.text, rainbow_phase);
     let mut all_spans = vec![prefix_span];
     all_spans.extend(msg_spans);
     let w = width as usize;

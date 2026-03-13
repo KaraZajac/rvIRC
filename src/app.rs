@@ -75,6 +75,9 @@ pub struct App {
     pub input: String,
     pub input_cursor: usize,
 
+    /// When the app was created; used for rainbow animation phase.
+    pub created_at: Instant,
+
     pub channel_panel_visible: bool,
     pub channel_list: Vec<String>,
     pub channel_index: usize,
@@ -278,6 +281,7 @@ impl App {
             license_popup_visible: false,
             license_popup_scroll_offset: 0,
             message_scroll_offset: 0,
+            created_at: Instant::now(),
             pending_auto_join: false,
             auto_join_after: None,
             channel_topics: HashMap::new(),

@@ -17,6 +17,7 @@ const RESET: char = '\x0F';
 /// Convert user-friendly syntax to IRC control codes before sending.
 /// Supports: *italic*, **bold**, ***bold italic***, ~~strikethrough~~, ||spoiler||,
 /// and :colorname: text :colorname: for colors.
+/// Note: @@...@@ is an rvIRC-only effect (not converted for IRC; displayed client-side).
 pub fn format_outgoing(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 32);
     let mut i = 0;
@@ -82,6 +83,9 @@ pub fn format_outgoing(text: &str) -> String {
                 continue;
             }
         }
+
+        // @@...@@ is rvIRC-only: pass through literal when sending (display handles it with animated rainbow)
+        // (no conversion here - other format patterns handled below)
 
         // :colorname: ... :colorname: or :normal: to reset
         if rest.starts_with(':') {
@@ -196,6 +200,57 @@ fn color_name_to_irc_code(name: &str) -> Option<u8> {
     .into_iter()
     .collect();
     map.get(name.to_lowercase().as_str()).copied()
+}
+
+/// Rainbow RGB colors for @@...@@ animated effect (rvIRC-only). Cycles over time.
+const RAINBOW_RGB: [(u8, u8, u8); 7] = [
+    (255, 0, 0),   // red
+    (255, 136, 0), // orange
+    (255, 255, 0), // yellow
+    (0, 255, 0),   // green
+    (0, 255, 255), // cyan
+    (0, 136, 255), // blue
+    (255, 0, 255), // magenta
+];
+
+/// Parse message text for display, handling @@...@@ as rvIRC-only animated rainbow.
+/// `phase` drives the animation (e.g. from elapsed time / 100ms). Use 0 for static.
+pub fn parse_message_with_rainbow(text: &str, phase: u64) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut i = 0;
+    let bytes = text.as_bytes();
+
+    while i < bytes.len() {
+        let rest = &text[i..];
+
+        // @@...@@ = rainbow segment (rvIRC-only, animated)
+        if rest.starts_with("@@") {
+            let (content, advance) = match find_matching_delim(rest, "@@") {
+                Some(end) => (&rest[2..end], end + 2),
+                None => (&rest[2..], rest.len()),
+            };
+            // Generate per-character rainbow spans with animated cycling
+            for (idx, ch) in content.chars().enumerate() {
+                let color_idx = (phase as usize + idx) % RAINBOW_RGB.len();
+                let (r, g, b) = RAINBOW_RGB[color_idx];
+                let style = Style::default().fg(Color::Rgb(r, g, b));
+                spans.push(Span::styled(ch.to_string(), style));
+            }
+            i += advance;
+            continue;
+        }
+
+        // Find next @@ or end of string for plain segment
+        let plain_end = rest.find("@@").unwrap_or(rest.len());
+        let plain = &rest[..plain_end];
+        if !plain.is_empty() {
+            let formatted = format_outgoing(plain);
+            spans.extend(parse_irc_formatting(&formatted));
+        }
+        i += plain_end;
+    }
+
+    spans
 }
 
 /// Parse IRC control codes and produce styled spans for display.
@@ -374,6 +429,51 @@ fn parse_hex_color(bytes: &[u8]) -> (usize, Color) {
     (start + 6, Color::Rgb(r, g, b))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_at_at_passthrough() {
+        // @@...@@ is rvIRC-only: passed through literal when sending
+        let formatted = format_outgoing("hello @@world@@");
+        assert_eq!(formatted, "hello @@world@@");
+    }
+
+    #[test]
+    fn test_rainbow_spans() {
+        let spans = parse_message_with_rainbow("hi @@foo@@ bar", 0);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).fold(String::new(), |mut a, b| {
+            a.push_str(b);
+            a
+        });
+        assert_eq!(text, "hi foo bar");
+    }
+}
+
+/// Strip IRC control codes and @@...@@ for display-width calculation.
+/// @@...@@ is replaced with its content so the visible width is correct.
+pub fn strip_for_display_width(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        let rest = &s[i..];
+        if rest.starts_with("@@") {
+            let (content, advance) = match find_matching_delim(rest, "@@") {
+                Some(end) => (rest[2..end].to_string(), end + 2),
+                None => (rest[2..].to_string(), rest.len()),
+            };
+            out.push_str(&strip_irc_codes(&content));
+            i += advance;
+        } else {
+            let next = rest.find("@@").unwrap_or(rest.len());
+            out.push_str(&strip_irc_codes(&rest[..next]));
+            i += next;
+        }
+    }
+    out
+}
+
 /// Strip IRC control codes for display-width calculation.
 pub fn strip_irc_codes(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -406,6 +506,19 @@ pub fn strip_irc_codes(s: &str) -> String {
     }
     out
 }
+
+/// Strip IRC codes and @@...@@ for display-width calculation (e.g. message line height).
+/// Replaces @@...@@ with its content so the width matches what is actually displayed.
+
+/// Strip IRC codes and @@...@@ for display-width calculation (what's actually shown).
+
+/// Strip IRC codes and @@...@@ for display-width calculation.
+/// @@...@@ is replaced with its content (delimiters not shown).
+
+/// Strip IRC codes and @@...@@ for display-width calculation.
+/// Replaces @@...@@ with its content so layout matches actual displayed text.
+
+/// Strip IRC codes and @@...@@ for display-width calculation (visible text only).
 
 /// Wrap styled spans to fit width, splitting spans as needed.
 pub fn wrap_spans(spans: &[Span<'static>], max_width: usize) -> Vec<Line<'static>> {
