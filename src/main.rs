@@ -9,6 +9,7 @@ mod events;
 mod filetransfer;
 mod format;
 mod friends;
+mod notifications;
 mod ui;
 
 use app::{App, MessageKind, MessageLine, Mode, PanelFocus, UserAction};
@@ -35,6 +36,8 @@ fn main() -> Result<(), String> {
     let mut app = App::new();
     app.render_images = config.render_images;
     app.offline_friends = config.offline_friends.clone();
+    app.notifications_enabled = config.notifications;
+    app.sounds_enabled = config.sounds;
     app.status_message = "Type :connect <server> to connect. :join #channel to join.".to_string();
 
     // Load persistent identity keypair (same directory as config.toml)
@@ -355,13 +358,27 @@ fn apply_irc_message(
                     spawn_image_download(url, image_id, irc_tx, rt);
                 }
             }
-            if target == app.current_nickname.as_deref().unwrap_or("") {
-                app.push_message(&line.source, line.clone());
+            let (effective_target, source, text) = if target == app.current_nickname.as_deref().unwrap_or("") {
                 if !app.dm_targets.contains(&line.source) {
                     app.dm_targets.push(line.source.clone());
                 }
+                app.push_message(&line.source, line.clone());
+                (line.source.clone(), line.source.clone(), line.text.clone())
             } else {
-                app.push_message(&target, line);
+                app.push_message(&target, line.clone());
+                (target.clone(), line.source.clone(), line.text.clone())
+            };
+            // Notify when message is for a different buffer than we're viewing
+            let current = app.current_channel.as_deref().unwrap_or("");
+            if effective_target != current && !app.is_muted(&effective_target, &source) {
+                let preview = format!("{}: {}", source, text);
+                let preview = preview.chars().take(80).collect::<String>();
+                if app.notifications_enabled {
+                    notifications::show_desktop(&effective_target, &preview);
+                }
+                if app.sounds_enabled {
+                    notifications::play_bell();
+                }
             }
         }
         M::JoinedChannel(ch) => {
@@ -1752,6 +1769,22 @@ fn run_command(
             } else {
                 app.status_message = format!("{} is not in friends list.", nick);
             }
+        }
+        R::NotificationsOn => {
+            app.notifications_enabled = true;
+            app.status_message = "Notifications on.".to_string();
+        }
+        R::NotificationsOff => {
+            app.notifications_enabled = false;
+            app.status_message = "Notifications off.".to_string();
+        }
+        R::Mute => {
+            app.sounds_enabled = false;
+            app.status_message = "Sounds muted.".to_string();
+        }
+        R::Unmute => {
+            app.sounds_enabled = true;
+            app.status_message = "Sounds unmuted.".to_string();
         }
         R::Version => {
             app.status_message = "rvIRC 1.0.0".to_string();

@@ -246,6 +246,10 @@ pub struct App {
     pub render_images: bool,
     /// Whether to show offline friends: None/"show" = show (red), Some("hide") = hide.
     pub offline_friends: Option<String>,
+    /// Show desktop notifications for messages in other buffers.
+    pub notifications_enabled: bool,
+    /// Play sound with notifications (:mute / :unmute toggle).
+    pub sounds_enabled: bool,
     pub next_image_id: usize,
     pub inline_images: HashMap<usize, InlineImage>,
 }
@@ -383,6 +387,8 @@ impl App {
 
             render_images: true,
             offline_friends: None,
+            notifications_enabled: true,
+            sounds_enabled: true,
             next_image_id: 0,
             inline_images: HashMap::new(),
         }

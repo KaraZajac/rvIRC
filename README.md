@@ -19,6 +19,7 @@
 - **Encrypted DMs**: Two rvIRC clients can establish an end-to-end encrypted DM session using `:secure` (or `:secure <nick>`). Uses fresh ephemeral X25519 key exchange per session + ChaCha20-Poly1305 with directional keys (no nonce reuse). A green lock icon appears in the channel list next to secure sessions; a checkmark appears when the peer is verified. Incoming requests show an accept/reject popup. Persistent identity keys are stored in `~/.config/rvIRC/identity.toml`. Trust on First Use (TOFU) key tracking warns if a peer's identity key changes. Optional SAS verification via `:verify` / `:verified`.
 - **File Transfer**: Send files between rvIRC clients using `:sendfile` (opens a file browser) or `:sendfile <nick> <path>`. Uses [magic-wormhole](https://crates.io/crates/magic-wormhole) for secure relay-based file transfer. The recipient gets a popup to accept or reject the file. In-chat status messages track transfer progress.
 - **Message area**: Long messages wrap to the pane width. The view auto-scrolls to the bottom when new messages arrive (scroll up with k/j or Page Up/Down to read history). Links that end in an image extension (e.g. `.png`, `.jpg`, `.gif`) are fetched and displayed inline in the chat using [ratatui-image](https://crates.io/crates/ratatui-image) when your terminal supports it (e.g. Sixel, Kitty, iTerm2); this works in channels, DMs, and encrypted DMs. Animated GIFs are fully animated: frames are pre-encoded when loaded, and only GIFs visible on screen animate (off-screen ones stay paused to save CPU).
+- **Notifications**: Desktop notifications and optional sound when messages arrive in a buffer you're not viewing. Config `notifications` and `sounds`; `:notifications on|off` and `:mute` / `:unmute` at runtime.
 - **IRC formatting**: Messages support bold, italic, strikethrough, and colors. Use `*italic*`, `**bold**`, `***bold italic***`, `~~strikethrough~~`, `||spoiler||` (rendered dim), and `:colorname: text :colorname:` for colors (e.g. `:blue:`, `:red:`, `:green:`). Use `:normal:` to reset formatting (e.g. `:red: red :normal: back to default`). Compatible with [IRC format codes](https://modern.ircdocs.horse/formatting).
 - **rvIRC effects** (sent as literal text; only rvIRC displays them): `@@text@@` = animated rainbow (cycles colors). `$$text$$` = scared (randomly flickers between normal, white, black, grey, bold).
 
@@ -51,6 +52,8 @@ Type `:` to enter COMMAND mode, then run any of these (case-insensitive):
 | `ban [channel] <mask>` | Set ban mask on channel (e.g. `*!*@host` or `nick!*@*`) |
 | `unban [channel] <mask>` | Remove ban mask |
 | `away [message]` | Set away status; no message clears it |
+| `notifications on` / `off` | Enable or disable desktop notifications |
+| `mute` / `unmute` | Mute or unmute notification sound |
 | `search` | Search in current buffer (popup) |
 | `clear` | Clear current channel/DM messages |
 | `channel #chan` / `chan` / `c #chan` | Switch to channel/DM by name |
@@ -159,6 +162,8 @@ real_name = "My Name"
 # download_dir = "~/Downloads/"   # optional: default save directory for received files
 # render_images = true            # optional: set to false to disable inline image display (default: true)
 # offline_friends = "show"       # optional: "show" (red names) or "hide" — hide omits offline friends from the list (default: show)
+# notifications = true           # optional: desktop notifications when messages arrive in other buffers (default: true)
+# sounds = true                  # optional: play terminal bell with notifications (default: true). Use :mute / :unmute to toggle at runtime
 
 [[servers]]
 name = "Libera"

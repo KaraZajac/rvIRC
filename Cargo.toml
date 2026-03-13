@@ -28,3 +28,4 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 ureq = "2"
 url = "2"
 zeroize = "1.8.2"
+notify-rust = "4"

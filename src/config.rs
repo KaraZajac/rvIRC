@@ -21,11 +21,21 @@ pub struct RvConfig {
     /// Whether to show offline friends in the list: "show" (red) or "hide" (default: show).
     #[serde(default)]
     pub offline_friends: Option<String>,
+    /// Show desktop notifications when messages arrive for a buffer you're not viewing (default: true).
+    #[serde(default = "default_true")]
+    pub notifications: bool,
+    /// Play a sound with notifications (default: true). Use :mute / :unmute to toggle at runtime.
+    #[serde(default = "default_true")]
+    pub sounds: bool,
     #[serde(default)]
     pub servers: Vec<ServerEntry>,
 }
 
 fn default_render_images() -> bool {
+    true
+}
+
+fn default_true() -> bool {
     true
 }
 
@@ -142,6 +152,8 @@ impl RvConfig {
             download_dir: None,
             render_images: true,
             offline_friends: None,
+            notifications: true,
+            sounds: true,
             servers: vec![
                 ServerEntry {
                     name: "Libera".to_string(),

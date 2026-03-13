@@ -50,6 +50,10 @@ pub enum CommandResult {
     SendFile { nick: String, path: String },
     Clear,
     Search,
+    NotificationsOn,
+    NotificationsOff,
+    Mute,
+    Unmute,
     NoOp,
     Unknown(String),
 }
@@ -287,6 +291,16 @@ pub fn parse(line: &str) -> CommandResult {
                 CommandResult::Away(Some(msg.to_string()))
             }
         }
+        "notifications" => {
+            let sub = rest.split_whitespace().next().unwrap_or("").to_lowercase();
+            match sub.as_str() {
+                "on" => CommandResult::NotificationsOn,
+                "off" => CommandResult::NotificationsOff,
+                _ => CommandResult::StatusMessage("Usage: :notifications on|off".to_string()),
+            }
+        }
+        "mute" => CommandResult::Mute,
+        "unmute" => CommandResult::Unmute,
         _ => CommandResult::Unknown(format!("Unknown command: {}", cmd)),
     }
 }
