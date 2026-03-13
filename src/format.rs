@@ -17,7 +17,7 @@ const RESET: char = '\x0F';
 /// Convert user-friendly syntax to IRC control codes before sending.
 /// Supports: *italic*, **bold**, ***bold italic***, ~~strikethrough~~, ||spoiler||,
 /// and :colorname: text :colorname: for colors.
-/// Note: @@...@@ is an rvIRC-only effect (not converted for IRC; displayed client-side).
+/// Note: @@...@@ and $$...$$ are rvIRC-only effects (not converted for IRC; displayed client-side).
 pub fn format_outgoing(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 32);
     let mut i = 0;
@@ -214,8 +214,8 @@ const RAINBOW_RGB: [(u8, u8, u8); 7] = [
 ];
 
 /// Parse message text for display, handling @@...@@ as rvIRC-only animated rainbow.
-/// `phase` drives the animation (e.g. from elapsed time / 100ms). Use 0 for static.
-pub fn parse_message_with_rainbow(text: &str, phase: u64) -> Vec<Span<'static>> {
+/// `elapsed_ms` drives the animation (elapsed time in ms). Rainbow uses ms/100; scared uses raw ms for chaotic per-char changes.
+pub fn parse_message_with_rainbow(text: &str, elapsed_ms: u64) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut i = 0;
     let bytes = text.as_bytes();
@@ -229,19 +229,45 @@ pub fn parse_message_with_rainbow(text: &str, phase: u64) -> Vec<Span<'static>> 
                 Some(end) => (&rest[2..end], end + 2),
                 None => (&rest[2..], rest.len()),
             };
-            // Generate per-character rainbow spans with animated cycling
+            let phase = (elapsed_ms / 100) as usize;
             for (idx, ch) in content.chars().enumerate() {
-                let color_idx = (phase as usize + idx) % RAINBOW_RGB.len();
+                let color_idx = (phase + idx) % RAINBOW_RGB.len();
                 let (r, g, b) = RAINBOW_RGB[color_idx];
-                let style = Style::default().fg(Color::Rgb(r, g, b));
+                spans.push(Span::styled(ch.to_string(), Style::default().fg(Color::Rgb(r, g, b))));
+            }
+            i += advance;
+            continue;
+        }
+
+        // $$...$$ = scared segment (rvIRC-only): each character gets a random style (normal, white, black, grey, bold)
+        if rest.starts_with("$$") {
+            let (content, advance) = match find_matching_delim(rest, "$$") {
+                Some(end) => (&rest[2..end], end + 2),
+                None => (&rest[2..], rest.len()),
+            };
+            for (idx, ch) in content.chars().enumerate() {
+                // Each character: raw ms + per-char multiplier + hash mixing for chaotic, non-cyclic changes
+                let idx_u = idx as u64;
+                let phase_mult = idx_u.wrapping_mul(37).wrapping_add(1); // different per char, avoid 0
+                let mut t = elapsed_ms.wrapping_mul(phase_mult).wrapping_add(idx_u.wrapping_mul(0x9e3779b9u64));
+                t ^= t >> 16;
+                t = t.wrapping_mul(0x85ebca77u64);
+                let style_idx = (t >> 32) as usize % 5;
+                let style = match style_idx {
+                    0 => Style::default(),
+                    1 => Style::default().fg(Color::White),
+                    2 => Style::default().fg(Color::Black),
+                    3 => Style::default().fg(Color::DarkGray),
+                    _ => Style::default().add_modifier(Modifier::BOLD),
+                };
                 spans.push(Span::styled(ch.to_string(), style));
             }
             i += advance;
             continue;
         }
 
-        // Find next @@ or end of string for plain segment
-        let plain_end = rest.find("@@").unwrap_or(rest.len());
+        // Find next @@ or $$ or end of string for plain segment
+        let plain_end = rest.find("@@").unwrap_or(usize::MAX).min(rest.find("$$").unwrap_or(usize::MAX)).min(rest.len());
         let plain = &rest[..plain_end];
         if !plain.is_empty() {
             let formatted = format_outgoing(plain);
@@ -449,10 +475,26 @@ mod tests {
         });
         assert_eq!(text, "hi foo bar");
     }
+
+    #[test]
+    fn test_scared_passthrough() {
+        let formatted = format_outgoing("hello $$world$$");
+        assert_eq!(formatted, "hello $$world$$");
+    }
+
+    #[test]
+    fn test_scared_spans() {
+        let spans = parse_message_with_rainbow("hi $$foo$$ bar", 0);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).fold(String::new(), |mut a, b| {
+            a.push_str(b);
+            a
+        });
+        assert_eq!(text, "hi foo bar");
+    }
 }
 
-/// Strip IRC control codes and @@...@@ for display-width calculation.
-/// @@...@@ is replaced with its content so the visible width is correct.
+/// Strip IRC control codes and rvIRC effects (@@...@@, $$...$$) for display-width calculation.
+/// Effect delimiters are replaced with their content so the visible width is correct.
 pub fn strip_for_display_width(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
@@ -465,8 +507,15 @@ pub fn strip_for_display_width(s: &str) -> String {
             };
             out.push_str(&strip_irc_codes(&content));
             i += advance;
+        } else if rest.starts_with("$$") {
+            let (content, advance) = match find_matching_delim(rest, "$$") {
+                Some(end) => (rest[2..end].to_string(), end + 2),
+                None => (rest[2..].to_string(), rest.len()),
+            };
+            out.push_str(&strip_irc_codes(&content));
+            i += advance;
         } else {
-            let next = rest.find("@@").unwrap_or(rest.len());
+            let next = rest.find("@@").unwrap_or(usize::MAX).min(rest.find("$$").unwrap_or(usize::MAX)).min(rest.len());
             out.push_str(&strip_irc_codes(&rest[..next]));
             i += next;
         }
