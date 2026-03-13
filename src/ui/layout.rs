@@ -34,3 +34,31 @@ pub fn center_with_side_panes(
         (false, false) => (chunks[0], None, None),
     }
 }
+
+/// Split a rect vertically in half. Returns (top_rect, bottom_rect).
+pub fn split_vertical(rect: Rect) -> (Rect, Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rect);
+    (chunks[0], chunks[1])
+}
+
+/// Split a rect by visibility: if both top and bottom are visible, 50/50 split;
+/// if only one is visible, that pane gets the full rect.
+/// Returns (Option<top_rect>, Option<bottom_rect>).
+pub fn split_vertical_by_visibility(
+    rect: Rect,
+    top_visible: bool,
+    bottom_visible: bool,
+) -> (Option<Rect>, Option<Rect>) {
+    match (top_visible, bottom_visible) {
+        (true, true) => {
+            let (top, bottom) = split_vertical(rect);
+            (Some(top), Some(bottom))
+        }
+        (true, false) => (Some(rect), None),
+        (false, true) => (None, Some(rect)),
+        (false, false) => (None, None),
+    }
+}

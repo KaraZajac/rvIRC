@@ -8,7 +8,9 @@ pub fn handle_key(
     mode: Mode,
     panel_focus: PanelFocus,
     channel_panel_visible: bool,
+    messages_panel_visible: bool,
     user_panel_visible: bool,
+    friends_panel_visible: bool,
     user_action_menu: bool,
     channel_list_popup_visible: bool,
     channel_list_scroll_mode: bool,
@@ -55,8 +57,14 @@ pub fn handle_key(
     if mode == Mode::Normal && panel_focus == PanelFocus::Channels && channel_panel_visible {
         return Some(handle_channels_pane(key));
     }
+    if mode == Mode::Normal && panel_focus == PanelFocus::Messages && messages_panel_visible {
+        return Some(handle_messages_pane(key));
+    }
     if mode == Mode::Normal && panel_focus == PanelFocus::Users && user_panel_visible {
         return Some(handle_users_pane(key));
+    }
+    if mode == Mode::Normal && panel_focus == PanelFocus::Friends && friends_panel_visible {
+        return Some(handle_friends_pane(key));
     }
 
     match mode {
@@ -72,11 +80,19 @@ pub enum KeyAction {
     QuitApp,
     SwitchMode(Mode),
     FocusChannels,
+    FocusMessages,
     FocusUsers,
+    FocusFriends,
     UnfocusPanel,
     ChannelUp,
     ChannelDown,
     ChannelSelect,
+    MessageUp,
+    MessageDown,
+    MessageSelect,
+    FriendUp,
+    FriendDown,
+    FriendSelect,
     UserUp,
     UserDown,
     UserSelect,
@@ -141,7 +157,9 @@ fn handle_normal(key: KeyEvent, panel_focus: PanelFocus) -> Option<KeyAction> {
         (KeyCode::Char('i'), KeyModifiers::NONE) => Some(KeyAction::SwitchMode(Mode::Insert)),
         (KeyCode::Char(':'), KeyModifiers::NONE) => Some(KeyAction::SwitchMode(Mode::Command)),
         (KeyCode::Char('c'), KeyModifiers::NONE) => Some(KeyAction::FocusChannels),
+        (KeyCode::Char('m'), KeyModifiers::NONE) => Some(KeyAction::FocusMessages),
         (KeyCode::Char('u'), KeyModifiers::NONE) => Some(KeyAction::FocusUsers),
+        (KeyCode::Char('f'), KeyModifiers::NONE) => Some(KeyAction::FocusFriends),
         (KeyCode::Esc, _) if panel_focus != PanelFocus::Main => Some(KeyAction::UnfocusPanel),
         _ => None,
     }
@@ -185,12 +203,32 @@ fn handle_channels_pane(key: KeyEvent) -> KeyAction {
     }
 }
 
+fn handle_messages_pane(key: KeyEvent) -> KeyAction {
+    match key.code {
+        KeyCode::Char('m') | KeyCode::Esc => KeyAction::UnfocusPanel,
+        KeyCode::Up | KeyCode::Char('k') => KeyAction::MessageUp,
+        KeyCode::Down | KeyCode::Char('j') => KeyAction::MessageDown,
+        KeyCode::Enter => KeyAction::MessageSelect,
+        _ => KeyAction::NoOp,
+    }
+}
+
 fn handle_users_pane(key: KeyEvent) -> KeyAction {
     match key.code {
         KeyCode::Char('u') | KeyCode::Esc => KeyAction::UnfocusPanel,
         KeyCode::Up | KeyCode::Char('k') => KeyAction::UserUp,
         KeyCode::Down | KeyCode::Char('j') => KeyAction::UserDown,
         KeyCode::Enter => KeyAction::UserSelect,
+        _ => KeyAction::NoOp,
+    }
+}
+
+fn handle_friends_pane(key: KeyEvent) -> KeyAction {
+    match key.code {
+        KeyCode::Char('f') | KeyCode::Esc => KeyAction::UnfocusPanel,
+        KeyCode::Up | KeyCode::Char('k') => KeyAction::FriendUp,
+        KeyCode::Down | KeyCode::Char('j') => KeyAction::FriendDown,
+        KeyCode::Enter => KeyAction::FriendSelect,
         _ => KeyAction::NoOp,
     }
 }

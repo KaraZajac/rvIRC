@@ -24,10 +24,18 @@ pub enum CommandResult {
     StatusMessage(String),
     ChannelPanelShow,
     ChannelPanelHide,
+    MessagesPanelShow,
+    MessagesPanelHide,
     UserPanelShow,
     UserPanelHide,
+    FriendsPanelShow,
+    FriendsPanelHide,
     FocusChannels,
+    FocusMessages,
     FocusUsers,
+    FocusFriends,
+    AddFriend(String),
+    RemoveFriend(String),
     Version,
     Credits,
     License,
@@ -161,6 +169,14 @@ pub fn parse(line: &str) -> CommandResult {
                 _ => CommandResult::StatusMessage("Usage: :channel-panel show|hide".to_string()),
             }
         }
+        "messages-panel" => {
+            let sub = rest.split_whitespace().next().unwrap_or("").to_lowercase();
+            match sub.as_str() {
+                "show" => CommandResult::MessagesPanelShow,
+                "hide" => CommandResult::MessagesPanelHide,
+                _ => CommandResult::StatusMessage("Usage: :messages-panel show|hide".to_string()),
+            }
+        }
         "user-panel" => {
             let sub = rest.split_whitespace().next().unwrap_or("").to_lowercase();
             match sub.as_str() {
@@ -169,8 +185,34 @@ pub fn parse(line: &str) -> CommandResult {
                 _ => CommandResult::StatusMessage("Usage: :user-panel show|hide".to_string()),
             }
         }
+        "friends-panel" => {
+            let sub = rest.split_whitespace().next().unwrap_or("").to_lowercase();
+            match sub.as_str() {
+                "show" => CommandResult::FriendsPanelShow,
+                "hide" => CommandResult::FriendsPanelHide,
+                _ => CommandResult::StatusMessage("Usage: :friends-panel show|hide".to_string()),
+            }
+        }
         "channels" => CommandResult::FocusChannels,
+        "messages" => CommandResult::FocusMessages,
         "users" => CommandResult::FocusUsers,
+        "friends" => CommandResult::FocusFriends,
+        "add-friend" => {
+            let nick = rest.split_whitespace().next().unwrap_or("").to_string();
+            if nick.is_empty() {
+                CommandResult::StatusMessage("Usage: :add-friend <nick>".to_string())
+            } else {
+                CommandResult::AddFriend(nick)
+            }
+        }
+        "remove-friend" => {
+            let nick = rest.split_whitespace().next().unwrap_or("").to_string();
+            if nick.is_empty() {
+                CommandResult::StatusMessage("Usage: :remove-friend <nick>".to_string())
+            } else {
+                CommandResult::RemoveFriend(nick)
+            }
+        }
         "version" => CommandResult::Version,
         "credits" => CommandResult::Credits,
         "license" => CommandResult::License,

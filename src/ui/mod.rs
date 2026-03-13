@@ -59,18 +59,32 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let input_area = chunks[1];
     let status_area = chunks[2];
 
+    let left_visible = app.channel_panel_visible || app.messages_panel_visible;
+    let right_visible = app.user_panel_visible || app.friends_panel_visible;
     let (center, left_opt, right_opt) = layout::center_with_side_panes(
         main_area,
-        app.channel_panel_visible.then_some(CHANNELS_PANE_WIDTH),
-        app.user_panel_visible.then_some(USERS_PANE_WIDTH),
+        left_visible.then_some(CHANNELS_PANE_WIDTH),
+        right_visible.then_some(USERS_PANE_WIDTH),
     );
 
     if let Some(left) = left_opt {
-        draw_channels_pane(f, left, app);
+        let (channels_rect, messages_rect) = layout::split_vertical_by_visibility(left, app.channel_panel_visible, app.messages_panel_visible);
+        if let Some(r) = channels_rect {
+            draw_channels_pane(f, r, app);
+        }
+        if let Some(r) = messages_rect {
+            draw_messages_pane(f, r, app);
+        }
     }
     draw_message_area(f, center, app);
     if let Some(right) = right_opt {
-        draw_users_pane(f, right, app);
+        let (users_rect, friends_rect) = layout::split_vertical_by_visibility(right, app.user_panel_visible, app.friends_panel_visible);
+        if let Some(r) = users_rect {
+            draw_users_pane(f, r, app);
+        }
+        if let Some(r) = friends_rect {
+            draw_friends_pane(f, r, app);
+        }
     }
 
     draw_input_bar(f, input_area, app);
@@ -436,8 +450,8 @@ fn target_display_label(app: &App, target: &str) -> String {
 
 fn draw_channels_pane(f: &mut Frame, area: Rect, app: &App) {
     let show_selector = app.panel_focus == PanelFocus::Channels;
-    let target_list = app.target_list();
-    let items: Vec<ListItem> = target_list
+    let list = app.channels_list();
+    let items: Vec<ListItem> = list
         .iter()
         .enumerate()
         .map(|(i, t)| {
@@ -475,6 +489,49 @@ fn draw_channels_pane(f: &mut Frame, area: Rect, app: &App) {
         .collect();
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(" Channels "))
+        .style(Style::default());
+    f.render_widget(list, area);
+}
+
+fn draw_messages_pane(f: &mut Frame, area: Rect, app: &App) {
+    let show_selector = app.panel_focus == PanelFocus::Messages;
+    let list = app.messages_list();
+    let items: Vec<ListItem> = list
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let secure = app.secure_sessions.contains_key(t);
+            let prefix = if show_selector && i == app.messages_index {
+                "> "
+            } else {
+                "  "
+            };
+            let style = if app.unread_mentions.contains(t) {
+                Style::default().fg(Color::Red)
+            } else if app.unread_targets.contains(t) {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default()
+            };
+            if secure {
+                let server = app.current_server.as_deref().unwrap_or("unknown");
+                let verified = app.known_keys.is_verified(t, server);
+                let mut spans = vec![
+                    Span::styled(prefix, style),
+                    Span::styled("\u{1F512}", Style::default().fg(Color::Green)),
+                ];
+                if verified {
+                    spans.push(Span::styled("\u{2714}", Style::default().fg(Color::Green)));
+                }
+                spans.push(Span::styled(format!("{}  ", t), style));
+                ListItem::new(Line::from(spans))
+            } else {
+                ListItem::new(Line::from(Span::styled(format!("{}{}  ", prefix, t), style)))
+            }
+        })
+        .collect();
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(" Messages "))
         .style(Style::default());
     f.render_widget(list, area);
 }
@@ -522,6 +579,39 @@ fn draw_users_pane(f: &mut Frame, area: Rect, app: &App) {
     };
     let mut state = ListState::default().with_selected(Some(app.user_index)).with_offset(offset);
     f.render_stateful_widget(list, area, &mut state);
+}
+
+fn draw_friends_pane(f: &mut Frame, area: Rect, app: &App) {
+    let show_selector = app.panel_focus == PanelFocus::Friends;
+    let items: Vec<ListItem> = app
+        .friends_list
+        .iter()
+        .enumerate()
+        .map(|(i, nick)| {
+            let prefix = if show_selector && i == app.friends_index {
+                "> "
+            } else {
+                "  "
+            };
+            let online = app.friends_online.contains(nick);
+            let dot = if online {
+                Span::styled("\u{25CF} ", Style::default().fg(Color::Green))
+            } else {
+                Span::styled("\u{25CB} ", Style::default().fg(Color::DarkGray))
+            };
+            let line = Line::from(vec![
+                Span::raw(prefix),
+                dot,
+                Span::raw(nick),
+                Span::raw("  "),
+            ]);
+            ListItem::new(line)
+        })
+        .collect();
+    let list = List::new(items)
+        .block(Block::default().borders(Borders::ALL).title(" Friends "))
+        .style(Style::default());
+    f.render_widget(list, area);
 }
 
 fn draw_user_action_menu(f: &mut Frame, app: &App, nick: &str) {

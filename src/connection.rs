@@ -59,6 +59,10 @@ pub enum IrcMessage {
     },
     /// Wormhole transfer finished (success or failure). Hides progress popup.
     TransferComplete { nick: String, filename: String, is_send: bool, success: bool },
+    /// MONITOR 730: nicks came online.
+    MonOnline { nicks: Vec<String> },
+    /// MONITOR 731: nicks went offline.
+    MonOffline { nicks: Vec<String> },
 }
 
 fn server_entry_to_irc_config(entry: &ServerEntry, rv: &RvConfig) -> IrcConfig {
@@ -306,6 +310,32 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx) {
                     }
                     C::Response(Response::ERR_NICKNAMEINUSE, _) => {
                         let _ = tx.send(IrcMessage::NickInUse);
+                    }
+                    C::Response(Response::RPL_MONONLINE, args) => {
+                        if args.len() >= 2 {
+                            let targets = args[1].strip_prefix(':').unwrap_or(&args[1]);
+                            let nicks: Vec<String> = targets
+                                .split(',')
+                                .map(|s| s.split('!').next().unwrap_or(s).trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                            if !nicks.is_empty() {
+                                let _ = tx.send(IrcMessage::MonOnline { nicks });
+                            }
+                        }
+                    }
+                    C::Response(Response::RPL_MONOFFLINE, args) => {
+                        if args.len() >= 2 {
+                            let targets = args[1].strip_prefix(':').unwrap_or(&args[1]);
+                            let nicks: Vec<String> = targets
+                                .split(',')
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                            if !nicks.is_empty() {
+                                let _ = tx.send(IrcMessage::MonOffline { nicks });
+                            }
+                        }
                     }
                     C::INVITE(ref _nick, ref channel) => {
                         let _ = tx.send(IrcMessage::Invite {

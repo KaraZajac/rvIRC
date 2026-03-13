@@ -67,7 +67,9 @@ pub enum UserAction {
 pub enum PanelFocus {
     Main,
     Channels,
+    Messages,
     Users,
+    Friends,
 }
 
 pub struct App {
@@ -79,14 +81,26 @@ pub struct App {
     pub created_at: Instant,
 
     pub channel_panel_visible: bool,
+    pub messages_panel_visible: bool,
     pub channel_list: Vec<String>,
     pub channel_index: usize,
+    /// Selection index within Messages (DM) list.
+    pub messages_index: usize,
 
     pub user_panel_visible: bool,
+    pub friends_panel_visible: bool,
     pub user_list: Vec<String>,
     pub user_index: usize,
     pub user_action_menu: bool,
     pub user_action_index: usize,
+    /// Friends list (MONITOR targets). Persisted per server.
+    pub friends_list: Vec<String>,
+    /// Friends currently online (from RPL_MONONLINE/731).
+    pub friends_online: HashSet<String>,
+    /// Selection index within friends list.
+    pub friends_index: usize,
+    /// Path to friends.toml for saving.
+    pub friends_path: Option<PathBuf>,
 
     pub panel_focus: PanelFocus,
 
@@ -255,13 +269,20 @@ impl App {
             input: String::new(),
             input_cursor: 0,
             channel_panel_visible: true,
+            messages_panel_visible: true,
             channel_list: Vec::new(),
             channel_index: 0,
+            messages_index: 0,
             user_panel_visible: true,
+            friends_panel_visible: true,
             user_list: Vec::new(),
             user_index: 0,
             user_action_menu: false,
             user_action_index: 0,
+            friends_list: Vec::new(),
+            friends_online: HashSet::new(),
+            friends_index: 0,
+            friends_path: None,
             panel_focus: PanelFocus::Main,
             current_channel: None,
             current_server: None,
@@ -420,22 +441,36 @@ impl App {
         self.server_list.get(self.server_list_selected_index).cloned()
     }
 
-    /// Ordered list for the left panel: server (if connected), then channels, then DM nicks.
-    pub fn target_list(&self) -> Vec<String> {
+    /// Channels pane: server (if connected) + channel list.
+    pub fn channels_list(&self) -> Vec<String> {
         let mut list = Vec::new();
         if self.current_server.is_some() {
             list.push("*server*".to_string());
         }
         list.extend(self.channel_list.iter().cloned());
-        list.extend(self.dm_targets.iter().cloned());
         list
     }
 
-    /// Selected target from the panel (server, channel, or nick). Clamps index to list len.
+    /// Messages pane: DM targets only.
+    pub fn messages_list(&self) -> Vec<String> {
+        self.dm_targets.clone()
+    }
+
+    /// Selected target based on panel focus. Channels -> channels_list; Messages -> messages_list.
     pub fn selected_target(&self) -> Option<String> {
-        let list = self.target_list();
-        let idx = self.channel_index.min(list.len().saturating_sub(1));
-        list.get(idx).cloned()
+        match self.panel_focus {
+            PanelFocus::Channels => {
+                let list = self.channels_list();
+                let idx = self.channel_index.min(list.len().saturating_sub(1));
+                list.get(idx).cloned()
+            }
+            PanelFocus::Messages => {
+                let list = self.messages_list();
+                let idx = self.messages_index.min(list.len().saturating_sub(1));
+                list.get(idx).cloned()
+            }
+            _ => self.current_channel.clone(),
+        }
     }
 
     pub fn current_messages(&self) -> &[MessageLine] {
@@ -522,9 +557,7 @@ impl App {
     #[allow(dead_code)]
     pub fn set_channel_list(&mut self, channels: Vec<String>) {
         self.channel_list = channels;
-        if self.channel_index >= self.channel_list.len() && !self.channel_list.is_empty() {
-            self.channel_index = self.channel_list.len().saturating_sub(1);
-        }
+        self.clamp_channel_index();
     }
 
     pub fn set_user_list(&mut self, users: Vec<String>) {
@@ -533,10 +566,6 @@ impl App {
         if self.user_index >= self.user_list.len() && !self.user_list.is_empty() {
             self.user_index = self.user_list.len().saturating_sub(1);
         }
-    }
-
-    pub fn selected_channel(&self) -> Option<String> {
-        self.selected_target()
     }
 
     /// Display title for the current message target (for Messages window title).
@@ -601,9 +630,9 @@ impl App {
         ]
     }
 
-    /// Clamp channel_index to valid range for target_list (e.g. after Part or Disconnect).
+    /// Clamp channel_index to valid range for channels_list.
     pub fn clamp_channel_index(&mut self) {
-        let len = self.target_list().len();
+        let len = self.channels_list().len();
         if len == 0 {
             self.channel_index = 0;
         } else {
@@ -611,14 +640,44 @@ impl App {
         }
     }
 
-    /// Set channel_index to the index of current_channel in target_list (e.g. after Join or SwitchChannel).
+    /// Clamp messages_index to valid range for dm_targets.
+    pub fn clamp_messages_index(&mut self) {
+        let len = self.dm_targets.len();
+        if len == 0 {
+            self.messages_index = 0;
+        } else {
+            self.messages_index = self.messages_index.min(len - 1);
+        }
+    }
+
+    /// Clamp friends_index to valid range for friends_list.
+    pub fn clamp_friends_index(&mut self) {
+        let len = self.friends_list.len();
+        if len == 0 {
+            self.friends_index = 0;
+        } else {
+            self.friends_index = self.friends_index.min(len - 1);
+        }
+    }
+
+    /// Set channel_index or messages_index to match current_channel (e.g. after Join or SwitchChannel).
     pub fn sync_channel_index_to_current(&mut self) {
-        let list = self.target_list();
         if let Some(ref target) = self.current_channel {
-            if let Some(pos) = list.iter().position(|t| t == target) {
-                self.channel_index = pos;
+            if target == "*server*" || target.starts_with('#') || target.starts_with('&') {
+                if let Some(pos) = self.channels_list().iter().position(|t| t == target) {
+                    self.channel_index = pos;
+                }
+            } else {
+                if let Some(pos) = self.dm_targets.iter().position(|t| t == target) {
+                    self.messages_index = pos;
+                }
             }
         }
+    }
+
+    /// Selected friend from the friends pane.
+    pub fn selected_friend(&self) -> Option<String> {
+        self.friends_list.get(self.friends_index).cloned()
     }
 }
 

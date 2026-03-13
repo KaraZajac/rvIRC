@@ -38,7 +38,7 @@ Type `:` to enter COMMAND mode, then run any of these (case-insensitive):
 | `servers` | Show server list from config; pick one to connect |
 | `reconnect` | Reconnect to the current server |
 | `join #channel [key]` | Join a channel (`#` added if omitted); optional key for keyed channels |
-| `part` / `leave` | Part current channel; `part #chan` parts specific channel |
+| `part` / `leave` | Part current channel or close current DM; `part #chan` parts a channel, `part nick` closes a DM window |
 | `list` | Fetch and show channel list (popup); type to filter, Enter to join |
 | `msg <nick> <text>` / `query` | Send a private message |
 | `me <action text>` | Send an action (/me) to the current channel or DM |
@@ -49,9 +49,11 @@ Type `:` to enter COMMAND mode, then run any of these (case-insensitive):
 | `ban [channel] <mask>` | Set ban mask on channel (e.g. `*!*@host` or `nick!*@*`) |
 | `channel #chan` / `chan` / `c #chan` | Switch to channel/DM by name |
 | `quit` / `exit` / `q` | Disconnect and quit |
-| `channel-panel show` / `hide` | Show or hide the channels pane |
-| `user-panel show` / `hide` | Show or hide the users pane |
-| `channels` / `users` | Focus channels or users pane |
+| `channel-panel show` / `hide` | Show or hide the channels pane (top left) |
+| `messages-panel show` / `hide` | Show or hide the messages pane (bottom left) |
+| `user-panel show` / `hide` | Show or hide the users pane (top right) |
+| `friends-panel show` / `hide` | Show or hide the friends pane (bottom right) |
+| `channels` / `messages` / `users` / `friends` | Focus the corresponding pane |
 | `version` | Show version (1.0.0) in status bar |
 | `credits` | Show credits popup (author and GitHub link) |
 | `license` | Show license popup (full LICENSE text) |
@@ -69,11 +71,13 @@ Type `:` to enter COMMAND mode, then run any of these (case-insensitive):
 |-----|--------|
 | `i` | Enter INSERT mode (type messages) |
 | `:` | Enter COMMAND mode (run commands) |
-| `c` | Toggle channels pane / focus channels |
-| `u` | Toggle users pane / focus users |
+| `c` | Focus channels pane |
+| `m` | Focus messages pane |
+| `u` | Focus users pane |
+| `f` | Focus friends pane |
 | `k` / `j` or ↑ / ↓ | Scroll message area (when focus on main) |
 | Page Up / Page Down | Scroll message area by page |
-| Esc | Unfocus channel/user pane (back to main) |
+| Esc | Unfocus side pane (back to main) |
 | Ctrl+C | Quit app |
 
 ### INSERT / COMMAND mode
@@ -90,6 +94,14 @@ Type `:` to enter COMMAND mode, then run any of these (case-insensitive):
 | Enter | Switch to selected channel |
 | `c` / Esc | Unfocus pane |
 
+### Messages pane (when focused)
+
+| Key | Action |
+|-----|--------|
+| `k` / `j` or ↑ / ↓ | Move selection |
+| Enter | Switch to selected DM |
+| `m` / Esc | Unfocus pane |
+
 ### Users pane (when focused)
 
 | Key | Action |
@@ -99,6 +111,16 @@ Type `:` to enter COMMAND mode, then run any of these (case-insensitive):
 | `u` / Esc | Unfocus pane |
 
 User actions: **Kick** and **Ban** perform the IRC command (current channel). **Mute** hides that nick’s messages locally.
+
+### Friends pane (when focused)
+
+| Key | Action |
+|-----|--------|
+| `k` / `j` or ↑ / ↓ | Move selection |
+| Enter | Open DM with selected friend |
+| `f` / Esc | Unfocus pane |
+
+Panels can be hidden independently with `:channel-panel hide`, `:messages-panel hide`, `:user-panel hide`, `:friends-panel hide`. When one pane on a side is hidden, the other takes the full height.
 
 ### Popups
 

@@ -8,6 +8,7 @@ mod crypto;
 mod events;
 mod filetransfer;
 mod format;
+mod friends;
 mod ui;
 
 use app::{App, MessageKind, MessageLine, Mode, PanelFocus, UserAction};
@@ -45,6 +46,8 @@ fn main() -> Result<(), String> {
         let known_keys_path = config_dir.join("known_keys.toml");
         app.known_keys = KnownKeys::load(&known_keys_path);
         app.known_keys_path = Some(known_keys_path);
+        let friends_path = config_dir.join("friends.toml");
+        app.friends_path = Some(friends_path);
     }
 
     let mut client: Option<Client> = None;
@@ -185,7 +188,15 @@ fn main() -> Result<(), String> {
                 }
                 _ => {}
             }
+            let was_connected = matches!(&msg, M::Connected { .. });
             apply_irc_message(&mut app, msg, &irc_tx, &rt);
+            if was_connected {
+                if let Some(ref c) = client {
+                    for nick in &app.friends_list {
+                        let _ = c.send(IrcCommand::MONITOR("+".to_string(), Some(nick.clone())));
+                    }
+                }
+            }
         }
 
         if !app.protocol_events.is_empty() {
@@ -280,7 +291,7 @@ fn main() -> Result<(), String> {
         let key_action = if let Ok(true) = event {
             crossterm::event::read()
                 .ok()
-                .and_then(|ev| handle_key(ev, app.mode, app.panel_focus, app.channel_panel_visible, app.user_panel_visible, app.user_action_menu, app.channel_list_popup_visible, app.channel_list_scroll_mode, app.server_list_popup_visible, app.whois_popup_visible, app.credits_popup_visible, app.license_popup_visible, app.file_receive_popup_visible, app.file_browser_visible, app.secure_accept_popup_visible))
+                .and_then(|ev| handle_key(ev, app.mode, app.panel_focus, app.channel_panel_visible, app.messages_panel_visible, app.user_panel_visible, app.friends_panel_visible, app.user_action_menu, app.channel_list_popup_visible, app.channel_list_scroll_mode, app.server_list_popup_visible, app.whois_popup_visible, app.credits_popup_visible, app.license_popup_visible, app.file_receive_popup_visible, app.file_browser_visible, app.secure_accept_popup_visible))
         } else {
             None
         };
@@ -395,8 +406,24 @@ fn apply_irc_message(
             app.status_message = format!("{} invited you to {} (use :join {} to join)", nick, channel, channel);
         }
         M::NickInUse | M::CtcpRequest { .. } | M::SendPrivmsg { .. } | M::SendPrivmsgOrEncrypt { .. } | M::Status(_) | M::ChatLog { .. } | M::ImageReady { .. } | M::AnimatedImageReady { .. } | M::TransferProgress { .. } | M::TransferComplete { .. } => {}
+        M::MonOnline { nicks } => {
+            for n in nicks {
+                app.friends_online.insert(n);
+            }
+        }
+        M::MonOffline { nicks } => {
+            for n in nicks {
+                app.friends_online.remove(&n);
+            }
+        }
         M::Connected { server } => {
-            app.current_server = Some(server);
+            app.current_server = Some(server.clone());
+            app.friends_online.clear();
+            if let Some(ref path) = app.friends_path {
+                app.friends_list = friends::load_friends(path, Some(&server));
+                app.friends_index = 0;
+                app.clamp_friends_index();
+            }
             app.status_message = "Connected.".to_string();
             app.pending_auto_join = true;
         }
@@ -409,6 +436,7 @@ fn apply_irc_message(
             app.unread_mentions.clear();
             app.channel_list.clear();
             app.dm_targets.clear();
+            app.clamp_messages_index();
             app.user_list.clear();
             app.channel_list_popup_visible = false;
             app.server_channel_list.clear();
@@ -423,6 +451,7 @@ fn apply_irc_message(
             app.channel_topics.clear();
             app.channel_modes.clear();
             app.last_invite = None;
+            app.friends_online.clear();
             app.status_message = "Disconnected.".to_string();
             if let Some(server) = server_for_reconnect {
                 app.reconnect_server = Some(server);
@@ -458,6 +487,11 @@ fn handle_key_action(
                 app.panel_focus = PanelFocus::Channels;
             }
         }
+        FocusMessages => {
+            if app.messages_panel_visible {
+                app.panel_focus = PanelFocus::Messages;
+            }
+        }
         FocusUsers => {
             if app.user_panel_visible {
                 app.panel_focus = PanelFocus::Users;
@@ -466,18 +500,59 @@ fn handle_key_action(
                 }
             }
         }
+        FocusFriends => {
+            if app.friends_panel_visible {
+                app.panel_focus = PanelFocus::Friends;
+            }
+        }
         UnfocusPanel => app.panel_focus = PanelFocus::Main,
         ChannelUp => {
             app.channel_index = app.channel_index.saturating_sub(1);
         }
         ChannelDown => {
-            let len = app.target_list().len();
+            let len = app.channels_list().len();
             if app.channel_index + 1 < len {
                 app.channel_index += 1;
             }
         }
+        MessageUp => {
+            app.messages_index = app.messages_index.saturating_sub(1);
+        }
+        MessageDown => {
+            if app.messages_index + 1 < app.dm_targets.len() {
+                app.messages_index += 1;
+            }
+        }
+        MessageSelect => {
+            if let Some(nick) = app.messages_list().get(app.messages_index).cloned() {
+                app.current_channel = Some(nick.clone());
+                app.mark_target_read(&nick);
+                app.message_scroll_offset = 0;
+                app.panel_focus = PanelFocus::Main;
+            }
+        }
+        FriendUp => {
+            app.friends_index = app.friends_index.saturating_sub(1);
+        }
+        FriendDown => {
+            if app.friends_index + 1 < app.friends_list.len() {
+                app.friends_index += 1;
+            }
+        }
+        FriendSelect => {
+            if let Some(nick) = app.selected_friend() {
+                if !app.dm_targets.contains(&nick) {
+                    app.dm_targets.push(nick.clone());
+                }
+                app.current_channel = Some(nick.clone());
+                app.mark_target_read(&nick);
+                app.message_scroll_offset = 0;
+                app.sync_channel_index_to_current();
+                app.panel_focus = PanelFocus::Main;
+            }
+        }
         ChannelSelect => {
-            if let Some(target) = app.selected_channel() {
+            if let Some(target) = app.channels_list().get(app.channel_index).cloned() {
                 app.current_channel = Some(target.clone());
                 app.mark_target_read(&target);
                 app.user_list.clear();
@@ -1074,27 +1149,55 @@ fn run_command(
                 app.status_message = "Not connected.".to_string();
             }
         }
-        R::Part(Some(ch)) => {
-            if let Some(ref c) = client {
-                c.send_part(&ch).map_err(|e| e.to_string())?;
-                app.channel_list.retain(|x| x != &ch);
+        R::Part(Some(target)) => {
+            if target.starts_with('#') || target.starts_with('&') {
+                if let Some(ref c) = client {
+                    c.send_part(&target).map_err(|e| e.to_string())?;
+                    app.channel_list.retain(|x| x != &target);
+                }
                 app.clamp_channel_index();
                 app.current_channel = app.selected_target();
-                if let Some(t) = app.current_channel.clone() {
-                    app.mark_target_read(&t);
+            } else {
+                // DM: close the message window
+                if app.dm_targets.contains(&target) {
+                    app.dm_targets.retain(|x| x != &target);
+                    app.clamp_messages_index();
+                    if app.current_channel.as_ref() == Some(&target) {
+                        app.current_channel = app.messages_list().first().cloned()
+                            .or_else(|| app.channels_list().first().cloned());
+                        app.sync_channel_index_to_current();
+                    }
+                    app.status_message = format!("Closed DM with {}", target);
+                } else {
+                    app.status_message = format!("No DM with {}.", target);
                 }
+            }
+            if let Some(t) = app.current_channel.clone() {
+                app.mark_target_read(&t);
             }
         }
         R::Part(None) => {
-            if let Some(ref ch) = app.current_channel {
-                if (ch.starts_with('#') || ch.starts_with('&')) && app.channel_list.iter().any(|c| c == ch) {
-                    if let Some(ref c) = client {
-                        c.send_part(ch).map_err(|e| e.to_string())?;
-                        app.channel_list.retain(|x| x != ch);
+            if let Some(target) = app.current_channel.clone() {
+                if target.starts_with('#') || target.starts_with('&') {
+                    if app.channel_list.iter().any(|c| c == &target) {
+                        if let Some(ref c) = client {
+                            c.send_part(&target).map_err(|e| e.to_string())?;
+                            app.channel_list.retain(|x| x != &target);
+                        }
+                    }
+                    app.clamp_channel_index();
+                    app.current_channel = app.selected_target();
+                } else {
+                    // DM: close the message window
+                    if app.dm_targets.contains(&target) {
+                        app.dm_targets.retain(|x| x != &target);
+                        app.clamp_messages_index();
+                        app.current_channel = app.messages_list().first().cloned()
+                            .or_else(|| app.channels_list().first().cloned());
+                        app.sync_channel_index_to_current();
+                        app.status_message = format!("Closed DM with {}", target);
                     }
                 }
-                app.clamp_channel_index();
-                app.current_channel = app.selected_target();
                 if let Some(t) = app.current_channel.clone() {
                     app.mark_target_read(&t);
                 }
@@ -1329,6 +1432,13 @@ fn run_command(
                 app.panel_focus = PanelFocus::Main;
             }
         }
+        R::MessagesPanelShow => app.messages_panel_visible = true,
+        R::MessagesPanelHide => {
+            app.messages_panel_visible = false;
+            if app.panel_focus == PanelFocus::Messages {
+                app.panel_focus = PanelFocus::Main;
+            }
+        }
         R::UserPanelShow => app.user_panel_visible = true,
         R::UserPanelHide => {
             app.user_panel_visible = false;
@@ -1336,9 +1446,66 @@ fn run_command(
                 app.panel_focus = PanelFocus::Main;
             }
         }
+        R::FriendsPanelShow => app.friends_panel_visible = true,
+        R::FriendsPanelHide => {
+            app.friends_panel_visible = false;
+            if app.panel_focus == PanelFocus::Friends {
+                app.panel_focus = PanelFocus::Main;
+            }
+        }
         R::FocusChannels => {
             if app.channel_panel_visible {
                 app.panel_focus = PanelFocus::Channels;
+            }
+        }
+        R::FocusMessages => {
+            if app.messages_panel_visible {
+                app.panel_focus = PanelFocus::Messages;
+            }
+        }
+        R::FocusFriends => {
+            if app.friends_panel_visible {
+                app.panel_focus = PanelFocus::Friends;
+            }
+        }
+        R::AddFriend(nick) => {
+            let nick = nick.trim().to_string();
+            if nick.is_empty() {
+                app.status_message = "Usage: :add-friend <nick>".to_string();
+            } else if app.friends_list.iter().any(|n| n.eq_ignore_ascii_case(&nick)) {
+                app.status_message = format!("{} is already a friend.", nick);
+            } else {
+                app.friends_list.push(nick.clone());
+                app.friends_list.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+                if app.friends_index >= app.friends_list.len() && !app.friends_list.is_empty() {
+                    app.friends_index = app.friends_list.len() - 1;
+                }
+                if let Some(ref c) = client {
+                    let _ = c.send(IrcCommand::MONITOR("+".to_string(), Some(nick.clone())));
+                }
+                if let Some(ref path) = app.friends_path {
+                    let _ = crate::friends::save_friends(path, app.current_server.as_deref(), &app.friends_list);
+                }
+                app.status_message = format!("Added {} to friends.", nick);
+            }
+        }
+        R::RemoveFriend(nick) => {
+            let nick = nick.trim();
+            if let Some(pos) = app.friends_list.iter().position(|n| n.eq_ignore_ascii_case(nick)) {
+                app.friends_list.remove(pos);
+                if app.friends_index >= app.friends_list.len() && app.friends_index > 0 {
+                    app.friends_index -= 1;
+                }
+                if let Some(ref c) = client {
+                    let _ = c.send(IrcCommand::MONITOR("-".to_string(), Some(nick.to_string())));
+                }
+                app.friends_online.remove(nick);
+                if let Some(ref path) = app.friends_path {
+                    let _ = crate::friends::save_friends(path, app.current_server.as_deref(), &app.friends_list);
+                }
+                app.status_message = format!("Removed {} from friends.", nick);
+            } else {
+                app.status_message = format!("{} is not in friends list.", nick);
             }
         }
         R::Version => {
@@ -1533,7 +1700,7 @@ fn complete_input(app: &mut App) {
     const COMMANDS: &[&str] = &[
         "join", "part", "list", "servers", "connect", "reconnect", "quit", "q",
         "msg", "me", "nick", "topic", "kick", "ban", "channel", "chan", "c",
-        "channel-panel", "user-panel", "channels", "users",
+        "channel-panel", "messages-panel", "user-panel", "friends-panel", "channels", "users",
         "version", "credits", "license",
         "secure", "unsecure", "sendfile",
         "verify", "verified",
