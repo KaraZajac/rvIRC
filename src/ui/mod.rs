@@ -96,6 +96,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
     }
 
+    if app.search_popup_visible {
+        draw_search_popup(f, area, app);
+    }
     if app.channel_list_popup_visible {
         draw_channel_list_popup(f, area, app);
     }
@@ -133,7 +136,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 }
 
-const IMAGE_DISPLAY_HEIGHT: u16 = 14;
+pub const IMAGE_DISPLAY_HEIGHT: u16 = 14;
 
 /// Break a string at character boundaries so no line exceeds max_width display columns.
 fn wrap_str_at_width(s: &str, max_width: usize) -> Vec<String> {
@@ -161,7 +164,7 @@ fn wrap_str_at_width(s: &str, max_width: usize) -> Vec<String> {
     segments
 }
 
-fn message_wrapped_height(m: &MessageLine, _current_nick: Option<&str>, width: u16) -> u16 {
+pub fn message_wrapped_height(m: &MessageLine, _current_nick: Option<&str>, width: u16) -> u16 {
     if width == 0 {
         return 1;
     }
@@ -647,7 +650,106 @@ fn draw_user_action_menu(f: &mut Frame, app: &App, nick: &str) {
                 .title(format!(" {} ", nick)),
         )
         .style(Style::default());
-    f.render_widget(list, menu_rect);
+    let visible = menu_rect.height.saturating_sub(2) as usize;
+    let len = actions.len();
+    let offset = if len <= visible {
+        0
+    } else {
+        (app.user_action_index + 1).saturating_sub(visible).min(len.saturating_sub(visible)).max(0)
+    };
+    let mut state = ListState::default()
+        .with_selected(Some(app.user_action_index))
+        .with_offset(offset);
+    f.render_stateful_widget(list, menu_rect, &mut state);
+}
+
+fn draw_search_popup(f: &mut Frame, area: Rect, app: &App) {
+    let popup_width = (area.width * 3 / 4).min(70).max(40);
+    let popup_height = (area.height * 3 / 4).min(24).max(10);
+    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
+    let popup_rect = Rect {
+        x,
+        y,
+        width: popup_width,
+        height: popup_height,
+    };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(3),
+        ])
+        .margin(1)
+        .split(popup_rect);
+
+    let list_items: Vec<ListItem> = if app.search_results.is_empty() {
+        let msg = if app.search_filter.is_empty() {
+            "No messages in buffer"
+        } else {
+            "No matches"
+        };
+        vec![ListItem::new(format!("  {}  ", msg))]
+    } else {
+        app.search_results
+            .iter()
+            .enumerate()
+            .map(|(i, (idx, preview))| {
+                let line = if i == app.search_selected_index {
+                    format!("> [{}] {}  ", idx + 1, preview)
+                } else {
+                    format!("  [{}] {}  ", idx + 1, preview)
+                };
+                ListItem::new(line)
+            })
+            .collect()
+    };
+
+    let filter_display = if app.search_filter.is_empty() {
+        "Filter: (type to search)".to_string()
+    } else {
+        format!("Filter: {}", app.search_filter)
+    };
+    let mode_hint = if app.search_scroll_mode {
+        "j/k or arrows: move | Enter: jump to message | Esc: back to search"
+    } else {
+        "Type to search | Enter: browse list | Esc: close"
+    };
+
+    f.render_widget(Clear, popup_rect);
+    let popup_style = popup_overlay_style();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Search ")
+        .style(popup_style);
+    f.render_widget(block, popup_rect);
+
+    let filter_para = Paragraph::new(filter_display).style(popup_style);
+    f.render_widget(filter_para, chunks[0]);
+    let hint_para = Paragraph::new(mode_hint).style(popup_style.add_modifier(Modifier::DIM));
+    f.render_widget(hint_para, chunks[1]);
+
+    let list = List::new(list_items).style(popup_style);
+    let list_area = chunks[2];
+    let visible = list_area.height as usize;
+    let len = app.search_results.len();
+    let offset = if len <= visible || visible == 0 {
+        0
+    } else {
+        (app.search_selected_index + 1)
+            .saturating_sub(visible)
+            .min(len.saturating_sub(visible))
+            .max(0)
+    };
+    let mut list_state = ListState::default()
+        .with_selected(if app.search_results.is_empty() {
+            None
+        } else {
+            Some(app.search_selected_index)
+        })
+        .with_offset(offset);
+    f.render_stateful_widget(list, list_area, &mut list_state);
 }
 
 fn draw_channel_list_popup(f: &mut Frame, area: Rect, app: &App) {
@@ -945,6 +1047,13 @@ fn action_label(a: &UserAction) -> &'static str {
         UserAction::Dm => "Direct message",
         UserAction::Kick => "Kick",
         UserAction::Ban => "Ban",
+        UserAction::Unban => "Unban",
+        UserAction::Op => "Op",
+        UserAction::Deop => "Deop",
+        UserAction::Voice => "Voice",
+        UserAction::Devoice => "Devoice",
+        UserAction::Halfop => "Halfop",
+        UserAction::Dehalfop => "Dehalfop",
         UserAction::Mute => "Mute",
         UserAction::Whois => "Whois",
     }

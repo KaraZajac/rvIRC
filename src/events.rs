@@ -14,6 +14,8 @@ pub fn handle_key(
     user_action_menu: bool,
     channel_list_popup_visible: bool,
     channel_list_scroll_mode: bool,
+    search_popup_visible: bool,
+    search_scroll_mode: bool,
     server_list_popup_visible: bool,
     whois_popup_visible: bool,
     credits_popup_visible: bool,
@@ -47,6 +49,9 @@ pub fn handle_key(
     }
     if channel_list_popup_visible {
         return Some(handle_list_popup(key, channel_list_scroll_mode));
+    }
+    if search_popup_visible {
+        return Some(handle_search_popup(key, search_scroll_mode));
     }
     if server_list_popup_visible {
         return Some(handle_server_list_popup(key));
@@ -108,6 +113,14 @@ pub enum KeyAction {
     ListPopupFocusFilter,
     ListPopupFilterChar(char),
     ListPopupBackspace,
+    SearchPopupFilterChar(char),
+    SearchPopupBackspace,
+    SearchPopupUp,
+    SearchPopupDown,
+    SearchPopupSelect,
+    SearchPopupClose,
+    SearchPopupFocusList,
+    SearchPopupFocusFilter,
     CloseWhoisPopup,
     CloseCreditsPopup,
     CloseLicensePopup,
@@ -322,6 +335,27 @@ fn handle_list_popup(key: KeyEvent, scroll_mode: bool) -> KeyAction {
             (KeyCode::Enter, _) => KeyAction::ListPopupFocusList,
             (KeyCode::Backspace, _) => KeyAction::ListPopupBackspace,
             (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => KeyAction::ListPopupFilterChar(c),
+            _ => KeyAction::NoOp,
+        }
+    }
+}
+
+fn handle_search_popup(key: KeyEvent, scroll_mode: bool) -> KeyAction {
+    use crossterm::event::KeyModifiers;
+    if scroll_mode {
+        match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) => KeyAction::SearchPopupFocusFilter,
+            (KeyCode::Enter, _) => KeyAction::SearchPopupSelect,
+            (KeyCode::Up, _) | (KeyCode::Char('k'), _) => KeyAction::SearchPopupUp,
+            (KeyCode::Down, _) | (KeyCode::Char('j'), _) => KeyAction::SearchPopupDown,
+            _ => KeyAction::NoOp,
+        }
+    } else {
+        match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) => KeyAction::SearchPopupClose,
+            (KeyCode::Enter, _) => KeyAction::SearchPopupFocusList,
+            (KeyCode::Backspace, _) => KeyAction::SearchPopupBackspace,
+            (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => KeyAction::SearchPopupFilterChar(c),
             _ => KeyAction::NoOp,
         }
     }

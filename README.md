@@ -45,8 +45,13 @@ Type `:` to enter COMMAND mode, then run any of these (case-insensitive):
 | `nick <newnick>` | Change your nickname |
 | `topic` | Show current channel topic; `topic <text>` to set it (if op) |
 | `whois [nick]` | Show whois info; omit nick to use current DM window |
+| `invite <nick> [#channel]` | Invite nick to channel (default: current) |
 | `kick [channel] <nick> [reason]` | Kick user from channel |
 | `ban [channel] <mask>` | Set ban mask on channel (e.g. `*!*@host` or `nick!*@*`) |
+| `unban [channel] <mask>` | Remove ban mask |
+| `away [message]` | Set away status; no message clears it |
+| `search` | Search in current buffer (popup) |
+| `clear` | Clear current channel/DM messages |
 | `channel #chan` / `chan` / `c #chan` | Switch to channel/DM by name |
 | `quit` / `exit` / `q` | Disconnect and quit |
 | `channel-panel show` / `hide` | Show or hide the channels pane (top left) |
@@ -107,10 +112,10 @@ Type `:` to enter COMMAND mode, then run any of these (case-insensitive):
 | Key | Action |
 |-----|--------|
 | `k` / `j` or ↑ / ↓ | Move selection |
-| Enter | Open user action menu (DM, Kick, Ban, Mute, Whois) |
+| Enter | Open user action menu (DM, Kick, Ban, Unban, Op, Deop, Voice, Devoice, Halfop, Dehalfop, Mute, Whois) |
 | `u` / Esc | Unfocus pane |
 
-User actions: **Kick** and **Ban** perform the IRC command (current channel). **Mute** hides that nick’s messages locally.
+User actions: **Kick**, **Ban**, **Unban**, **Op**, **Deop**, **Voice**, **Devoice**, **Halfop**, **Dehalfop** perform the IRC command (current channel). **Mute** hides that nick’s messages locally.
 
 ### Friends pane (when focused)
 
@@ -126,6 +131,7 @@ Panels can be hidden independently with `:channel-panel hide`, `:messages-panel 
 
 - **:servers** — j/k or arrows to move, **Enter** to connect, **Esc** to close.
 - **:list** — Type to filter; **Enter** to toggle “scroll mode” then j/k + Enter to join; **Esc** to close.
+- **:search** — Type to filter messages; **Enter** to browse list, then j/k + Enter to jump to message; **Esc** to close.
 - **Whois** — **Esc** or **Enter** or **q** to close.
 - **:credits** — **Esc** or **Enter** or **q** to close.
 - **:license** — **j/k** or arrows / Page Up/Down to scroll; **Esc** or **Enter** or **q** to close.

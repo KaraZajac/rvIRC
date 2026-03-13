@@ -58,6 +58,13 @@ pub enum UserAction {
     Dm,
     Kick,
     Ban,
+    Unban,
+    Op,
+    Deop,
+    Voice,
+    Devoice,
+    Halfop,
+    Dehalfop,
     Mute,
     Whois,
 }
@@ -109,6 +116,14 @@ pub struct App {
     pub current_nickname: Option<String>,
     pub dm_targets: Vec<String>,
     pub messages: HashMap<String, Vec<MessageLine>>,
+
+    /// :search popup: filter, results (index, preview), selection.
+    pub search_popup_visible: bool,
+    pub search_filter: String,
+    pub search_results: Vec<(usize, String)>,
+    pub search_selected_index: usize,
+    /// false = filter mode (type to search), true = scroll mode (j/k, Enter jumps).
+    pub search_scroll_mode: bool,
 
     /// :list popup: server channel list (from LIST command), filter, selection.
     /// Each entry is (channel name, optional user count).
@@ -222,6 +237,8 @@ pub struct App {
     pub file_browser_pending_nick: String,
 
     pub status_message: String,
+    /// Current away message (None = not away).
+    pub away_message: Option<String>,
 
     /// Whether to fetch and render inline images for image URLs (from config).
     pub render_images: bool,
@@ -289,6 +306,11 @@ impl App {
             current_nickname: None,
             dm_targets: Vec::new(),
             messages: HashMap::new(),
+            search_popup_visible: false,
+            search_filter: String::new(),
+            search_results: Vec::new(),
+            search_selected_index: 0,
+            search_scroll_mode: false,
             channel_list_popup_visible: false,
             server_channel_list: Vec::new(),
             channel_list_filter: String::new(),
@@ -352,6 +374,7 @@ impl App {
             file_browser_pending_code: String::new(),
             file_browser_pending_nick: String::new(),
             status_message: String::new(),
+            away_message: None,
 
             render_images: true,
             next_image_id: 0,
@@ -482,6 +505,25 @@ impl App {
             .get(key)
             .map(|v| v.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// Update search_results from current_messages filtered by search_filter (case-insensitive).
+    pub fn update_search_results(&mut self) {
+        let target_key = self.current_channel.as_deref().unwrap_or("*server*");
+        let messages = self.current_messages();
+        let filter_lower = self.search_filter.to_lowercase();
+        self.search_results = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| !self.is_muted(target_key, &m.source))
+            .filter(|(_, m)| filter_lower.is_empty() || m.text.to_lowercase().contains(&filter_lower))
+            .map(|(i, m)| {
+                let preview = format!("{}: {}", m.source, m.text);
+                let preview = preview.chars().take(60).collect::<String>();
+                (i, preview)
+            })
+            .collect();
+        self.search_selected_index = self.search_selected_index.min(self.search_results.len().saturating_sub(1));
     }
 
     /// Whether to hide messages from this nick in the given target (mute list).
@@ -625,6 +667,13 @@ impl App {
             UserAction::Dm,
             UserAction::Kick,
             UserAction::Ban,
+            UserAction::Unban,
+            UserAction::Op,
+            UserAction::Deop,
+            UserAction::Voice,
+            UserAction::Devoice,
+            UserAction::Halfop,
+            UserAction::Dehalfop,
             UserAction::Mute,
             UserAction::Whois,
         ]

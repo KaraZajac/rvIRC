@@ -291,7 +291,7 @@ fn main() -> Result<(), String> {
         let key_action = if let Ok(true) = event {
             crossterm::event::read()
                 .ok()
-                .and_then(|ev| handle_key(ev, app.mode, app.panel_focus, app.channel_panel_visible, app.messages_panel_visible, app.user_panel_visible, app.friends_panel_visible, app.user_action_menu, app.channel_list_popup_visible, app.channel_list_scroll_mode, app.server_list_popup_visible, app.whois_popup_visible, app.credits_popup_visible, app.license_popup_visible, app.file_receive_popup_visible, app.file_browser_visible, app.secure_accept_popup_visible))
+                .and_then(|ev| handle_key(ev, app.mode, app.panel_focus, app.channel_panel_visible, app.messages_panel_visible, app.user_panel_visible, app.friends_panel_visible, app.user_action_menu, app.channel_list_popup_visible, app.channel_list_scroll_mode, app.search_popup_visible, app.search_scroll_mode, app.server_list_popup_visible, app.whois_popup_visible, app.credits_popup_visible, app.license_popup_visible, app.file_receive_popup_visible, app.file_browser_visible, app.secure_accept_popup_visible))
         } else {
             None
         };
@@ -438,6 +438,7 @@ fn apply_irc_message(
             app.dm_targets.clear();
             app.clamp_messages_index();
             app.user_list.clear();
+            app.search_popup_visible = false;
             app.channel_list_popup_visible = false;
             app.server_channel_list.clear();
             app.channel_list_filter.clear();
@@ -452,6 +453,7 @@ fn apply_irc_message(
             app.channel_modes.clear();
             app.last_invite = None;
             app.friends_online.clear();
+            app.away_message = None;
             app.status_message = "Disconnected.".to_string();
             if let Some(server) = server_for_reconnect {
                 app.reconnect_server = Some(server);
@@ -641,6 +643,112 @@ fn handle_key_action(
                             app.status_message = "No channel.".to_string();
                         }
                     }
+                    UserAction::Unban => {
+                        app.user_action_menu = false;
+                        if let Some(ref ch) = app.current_channel.as_ref() {
+                            if (ch.starts_with('#') || ch.starts_with('&')) && client.as_ref().is_some() {
+                                if let Some(ref c) = client {
+                                    let mask = format!("{}!*@*", nick);
+                                    let _ = c.send_mode(ch, &[IrcMode::Minus(IrcChannelMode::Ban, Some(mask))]);
+                                    app.status_message = format!("Unbanned {} on {}", nick, ch);
+                                }
+                            } else {
+                                app.status_message = "Not a channel.".to_string();
+                            }
+                        } else {
+                            app.status_message = "No channel.".to_string();
+                        }
+                    }
+                    UserAction::Op => {
+                        app.user_action_menu = false;
+                        if let Some(ref ch) = app.current_channel.as_ref() {
+                            if (ch.starts_with('#') || ch.starts_with('&')) && client.as_ref().is_some() {
+                                if let Some(ref c) = client {
+                                    let _ = c.send_mode(ch, &[IrcMode::Plus(IrcChannelMode::Oper, Some(nick.clone()))]);
+                                    app.status_message = format!("Opped {} on {}", nick, ch);
+                                }
+                            } else {
+                                app.status_message = "Not a channel.".to_string();
+                            }
+                        } else {
+                            app.status_message = "No channel.".to_string();
+                        }
+                    }
+                    UserAction::Deop => {
+                        app.user_action_menu = false;
+                        if let Some(ref ch) = app.current_channel.as_ref() {
+                            if (ch.starts_with('#') || ch.starts_with('&')) && client.as_ref().is_some() {
+                                if let Some(ref c) = client {
+                                    let _ = c.send_mode(ch, &[IrcMode::Minus(IrcChannelMode::Oper, Some(nick.clone()))]);
+                                    app.status_message = format!("Deopped {} on {}", nick, ch);
+                                }
+                            } else {
+                                app.status_message = "Not a channel.".to_string();
+                            }
+                        } else {
+                            app.status_message = "No channel.".to_string();
+                        }
+                    }
+                    UserAction::Voice => {
+                        app.user_action_menu = false;
+                        if let Some(ref ch) = app.current_channel.as_ref() {
+                            if (ch.starts_with('#') || ch.starts_with('&')) && client.as_ref().is_some() {
+                                if let Some(ref c) = client {
+                                    let _ = c.send_mode(ch, &[IrcMode::Plus(IrcChannelMode::Voice, Some(nick.clone()))]);
+                                    app.status_message = format!("Voiced {} on {}", nick, ch);
+                                }
+                            } else {
+                                app.status_message = "Not a channel.".to_string();
+                            }
+                        } else {
+                            app.status_message = "No channel.".to_string();
+                        }
+                    }
+                    UserAction::Devoice => {
+                        app.user_action_menu = false;
+                        if let Some(ref ch) = app.current_channel.as_ref() {
+                            if (ch.starts_with('#') || ch.starts_with('&')) && client.as_ref().is_some() {
+                                if let Some(ref c) = client {
+                                    let _ = c.send_mode(ch, &[IrcMode::Minus(IrcChannelMode::Voice, Some(nick.clone()))]);
+                                    app.status_message = format!("Devoiced {} on {}", nick, ch);
+                                }
+                            } else {
+                                app.status_message = "Not a channel.".to_string();
+                            }
+                        } else {
+                            app.status_message = "No channel.".to_string();
+                        }
+                    }
+                    UserAction::Halfop => {
+                        app.user_action_menu = false;
+                        if let Some(ref ch) = app.current_channel.as_ref() {
+                            if (ch.starts_with('#') || ch.starts_with('&')) && client.as_ref().is_some() {
+                                if let Some(ref c) = client {
+                                    let _ = c.send_mode(ch, &[IrcMode::Plus(IrcChannelMode::Halfop, Some(nick.clone()))]);
+                                    app.status_message = format!("Halfopped {} on {}", nick, ch);
+                                }
+                            } else {
+                                app.status_message = "Not a channel.".to_string();
+                            }
+                        } else {
+                            app.status_message = "No channel.".to_string();
+                        }
+                    }
+                    UserAction::Dehalfop => {
+                        app.user_action_menu = false;
+                        if let Some(ref ch) = app.current_channel.as_ref() {
+                            if (ch.starts_with('#') || ch.starts_with('&')) && client.as_ref().is_some() {
+                                if let Some(ref c) = client {
+                                    let _ = c.send_mode(ch, &[IrcMode::Minus(IrcChannelMode::Halfop, Some(nick.clone()))]);
+                                    app.status_message = format!("Dehalfopped {} on {}", nick, ch);
+                                }
+                            } else {
+                                app.status_message = "Not a channel.".to_string();
+                            }
+                        } else {
+                            app.status_message = "No channel.".to_string();
+                        }
+                    }
                     UserAction::Mute => {
                         app.user_action_menu = false;
                         let key = app.current_channel.as_deref().unwrap_or("*").to_string();
@@ -788,6 +896,66 @@ fn handle_key_action(
                 app.clamp_channel_list_selected_index();
             }
         }
+        SearchPopupUp => {
+            app.search_selected_index = app.search_selected_index.saturating_sub(1);
+        }
+        SearchPopupDown => {
+            if app.search_selected_index + 1 < app.search_results.len() {
+                app.search_selected_index += 1;
+            }
+        }
+        SearchPopupSelect => {
+            if let Some((msg_index, _)) = app.search_results.get(app.search_selected_index) {
+                let target_key = app.current_channel.as_deref().unwrap_or("*server*");
+                let messages: Vec<_> = app
+                    .current_messages()
+                    .iter()
+                    .filter(|m| !app.is_muted(target_key, &m.source))
+                    .cloned()
+                    .collect();
+                if *msg_index < messages.len() {
+                    let nick = app.current_nickname.as_deref();
+                    const SEARCH_WIDTH: u16 = 72;
+                    let item_heights: Vec<usize> = messages.iter().map(|m| {
+                        let h = ui::message_wrapped_height(m, nick, SEARCH_WIDTH) as usize;
+                        match m.image_id {
+                            Some(id) if app.inline_images.contains_key(&id) => h + crate::ui::IMAGE_DISPLAY_HEIGHT as usize,
+                            Some(_) => h + 1,
+                            None => h,
+                        }
+                    }).collect();
+                    let rows_from_bottom: usize = item_heights[*msg_index + 1..].iter().sum();
+                    app.message_scroll_offset = rows_from_bottom;
+                }
+                app.search_popup_visible = false;
+                app.search_filter.clear();
+                app.search_scroll_mode = false;
+                app.status_message = "Jumped to message.".to_string();
+            }
+        }
+        SearchPopupClose => {
+            app.search_popup_visible = false;
+            app.search_filter.clear();
+            app.search_scroll_mode = false;
+        }
+        SearchPopupFocusList => {
+            app.search_scroll_mode = true;
+        }
+        SearchPopupFocusFilter => {
+            app.search_scroll_mode = false;
+        }
+        SearchPopupFilterChar(c) => {
+            if c != '\0' {
+                app.search_filter.push(c);
+                app.update_search_results();
+            }
+        }
+        SearchPopupBackspace => {
+            if !app.search_filter.is_empty() {
+                app.search_filter.pop();
+                app.update_search_results();
+            }
+        }
         Char(c) => {
             if c != '\0' {
                 if app.mode == Mode::Insert || app.mode == Mode::Command {
@@ -864,6 +1032,11 @@ fn handle_key_action(
                                 Ok((nonce, ct)) => {
                                     let wire = format!("[:rvIRC:ENC:{}:{}]", nonce, ct);
                                     c.send_privmsg(&target, &wire).map_err(|e| e.to_string())?;
+                                    if app.away_message.is_some() {
+                                        let _ = c.send(IrcCommand::AWAY(None));
+                                        app.away_message = None;
+                                        app.status_message = "Auto-unaway.".to_string();
+                                    }
                                     push_self_message(app, &target, formatted, irc_tx, rt);
                                 }
                                 Err(e) => {
@@ -872,6 +1045,11 @@ fn handle_key_action(
                             }
                         } else {
                             c.send_privmsg(&target, &formatted).map_err(|e| e.to_string())?;
+                            if app.away_message.is_some() {
+                                let _ = c.send(IrcCommand::AWAY(None));
+                                app.away_message = None;
+                                app.status_message = "Auto-unaway.".to_string();
+                            }
                             push_self_message(app, &target, formatted, irc_tx, rt);
                         }
                     }
@@ -1418,11 +1596,66 @@ fn run_command(
                 app.status_message = "Usage: :ban [channel] <mask>".to_string();
             }
         }
+        R::Unban { channel, mask } => {
+            let ch = channel.or_else(|| app.current_channel.clone()).filter(|c| c.starts_with('#') || c.starts_with('&'));
+            if let (Some(ref c), Some(ch)) = (client.as_ref(), ch) {
+                if mask.is_empty() {
+                    app.status_message = "Usage: :unban [channel] <mask>".to_string();
+                } else {
+                    c.send_mode(&ch, &[IrcMode::Minus(IrcChannelMode::Ban, Some(mask.clone()))]).map_err(|e| e.to_string())?;
+                    app.status_message = format!("Unbanned {} on {}", mask, ch);
+                }
+            } else {
+                app.status_message = "Usage: :unban [channel] <mask>".to_string();
+            }
+        }
+        R::Invite { nick, channel } => {
+            let ch = channel.or_else(|| app.current_channel.clone()).filter(|c| c.starts_with('#') || c.starts_with('&'));
+            if let (Some(ref c), Some(ch)) = (client.as_ref(), ch) {
+                c.send_invite(&nick, &ch).map_err(|e| e.to_string())?;
+                app.status_message = format!("Invited {} to {}", nick, ch);
+            } else {
+                app.status_message = "Usage: :invite <nick> [#channel] (need a channel)".to_string();
+            }
+        }
+        R::Away(msg) => {
+            if let Some(ref c) = client {
+                let _ = c.send(IrcCommand::AWAY(msg.clone()));
+                app.away_message = msg;
+                app.status_message = match &app.away_message {
+                    Some(m) => format!("Away: {}", m),
+                    None => "No longer away.".to_string(),
+                };
+            } else {
+                app.status_message = "Not connected.".to_string();
+            }
+        }
         R::SwitchChannel(ch) => {
             app.current_channel = Some(ch.clone());
             app.mark_target_read(&ch);
             app.sync_channel_index_to_current();
             app.message_scroll_offset = 0;
+        }
+        R::Search => {
+            app.search_popup_visible = true;
+            app.search_filter.clear();
+            app.search_scroll_mode = false;
+            app.update_search_results();
+            app.search_selected_index = 0;
+            app.status_message = "Search (type to filter, Enter to browse, Esc to close)".to_string();
+        }
+        R::Clear => {
+            let key = app.current_channel.as_deref().unwrap_or("*server*").to_string();
+            let image_ids: Vec<usize> = app.messages
+                .get(&key)
+                .map(|v| v.iter().filter_map(|m| m.image_id).collect())
+                .unwrap_or_default();
+            for id in image_ids {
+                app.inline_images.remove(&id);
+            }
+            app.messages.remove(&key);
+            app.message_scroll_offset = 0;
+            app.status_message = format!("Cleared {}.", key);
         }
         R::StatusMessage(m) => app.status_message = m,
         R::ChannelPanelShow => app.channel_panel_visible = true,
@@ -1698,7 +1931,7 @@ fn run_command(
 /// Tab completion: command name only (first word after :).
 fn complete_input(app: &mut App) {
     const COMMANDS: &[&str] = &[
-        "join", "part", "list", "servers", "connect", "reconnect", "quit", "q",
+        "join", "part", "list", "servers", "connect", "reconnect", "quit", "q", "clear", "invite", "away", "unban", "search",
         "msg", "me", "nick", "topic", "kick", "ban", "channel", "chan", "c",
         "channel-panel", "messages-panel", "user-panel", "friends-panel", "channels", "users",
         "version", "credits", "license",

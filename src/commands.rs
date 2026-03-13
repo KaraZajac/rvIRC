@@ -19,7 +19,10 @@ pub enum CommandResult {
     Topic(Option<String>), // None = request, Some = set
     Kick { channel: Option<String>, nick: String, reason: Option<String> },
     Ban { channel: Option<String>, mask: String },
+    Unban { channel: Option<String>, mask: String },
+    Invite { nick: String, channel: Option<String> },
     SwitchChannel(String),
+    Away(Option<String>),
     UserAction { nick: String, action: UserAction },
     StatusMessage(String),
     ChannelPanelShow,
@@ -45,6 +48,8 @@ pub enum CommandResult {
     Verify(String),
     Verified(String),
     SendFile { nick: String, path: String },
+    Clear,
+    Search,
     NoOp,
     Unknown(String),
 }
@@ -139,6 +144,36 @@ pub fn parse(line: &str) -> CommandResult {
                 CommandResult::Ban { channel, mask }
             } else {
                 CommandResult::Ban { channel: None, mask: parts[0].to_string() }
+            }
+        }
+        "unban" => {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if parts.is_empty() {
+                CommandResult::StatusMessage("Usage: :unban <mask> or :unban #channel <mask>".to_string())
+            } else if parts[0].starts_with('#') || parts[0].starts_with('&') {
+                let channel = Some(parts[0].to_string());
+                let mask = parts.get(1).unwrap_or(&"").to_string();
+                CommandResult::Unban { channel, mask }
+            } else {
+                CommandResult::Unban { channel: None, mask: parts[0].to_string() }
+            }
+        }
+        "invite" => {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if parts.is_empty() {
+                CommandResult::StatusMessage("Usage: :invite <nick> [#channel]".to_string())
+            } else if parts[0].starts_with('#') || parts[0].starts_with('&') {
+                CommandResult::StatusMessage("Usage: :invite <nick> [#channel]".to_string())
+            } else if parts.len() >= 2 {
+                let nick = parts[0].to_string();
+                let channel = if parts[1].starts_with('#') || parts[1].starts_with('&') {
+                    Some(parts[1].to_string())
+                } else {
+                    Some(format!("#{}", parts[1]))
+                };
+                CommandResult::Invite { nick, channel }
+            } else {
+                CommandResult::Invite { nick: parts[0].to_string(), channel: None }
             }
         }
         "msg" | "message" | "query" => {
@@ -241,6 +276,16 @@ pub fn parse(line: &str) -> CommandResult {
             let nick = parts.next().unwrap_or("").to_string();
             let path = parts.next().unwrap_or("").trim().to_string();
             CommandResult::SendFile { nick, path }
+        }
+        "clear" => CommandResult::Clear,
+        "search" => CommandResult::Search,
+        "away" => {
+            let msg = rest.trim();
+            if msg.is_empty() {
+                CommandResult::Away(None)
+            } else {
+                CommandResult::Away(Some(msg.to_string()))
+            }
         }
         _ => CommandResult::Unknown(format!("Unknown command: {}", cmd)),
     }
