@@ -1608,10 +1608,11 @@ fn spawn_image_download(
                             let mut frames = Vec::with_capacity(raw_frames.len().min(MAX_GIF_FRAMES));
                             let mut delays = Vec::with_capacity(frames.capacity());
                             for frame in raw_frames.into_iter().take(MAX_GIF_FRAMES) {
-                                let (numer, denom) = frame.delay().numer_denom_ms();
-                                let ms = if denom == 0 { 100 } else { numer / denom };
-                                let ms = ms.max(20);
-                                delays.push(std::time::Duration::from_millis(ms as u64));
+                                let mut d = std::time::Duration::from(frame.delay());
+                                if d < std::time::Duration::from_millis(20) {
+                                    d = std::time::Duration::from_millis(20);
+                                }
+                                delays.push(d);
                                 let img = image::DynamicImage::ImageRgba8(frame.into_buffer());
                                 frames.push(img);
                             }

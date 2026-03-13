@@ -115,7 +115,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 }
 
-const IMAGE_DISPLAY_HEIGHT: u16 = 12;
+const IMAGE_DISPLAY_HEIGHT: u16 = 14;
 
 /// Break a string at character boundaries so no line exceeds max_width display columns.
 fn wrap_str_at_width(s: &str, max_width: usize) -> Vec<String> {
