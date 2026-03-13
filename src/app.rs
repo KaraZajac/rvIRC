@@ -180,6 +180,14 @@ pub struct App {
     pub file_receive_size: u64,
     pub file_receive_code: String,
 
+    /// Wormhole transfer progress popup (shown during send/receive).
+    pub transfer_progress_visible: bool,
+    pub transfer_progress_nick: String,
+    pub transfer_progress_filename: String,
+    pub transfer_progress_bytes: u64,
+    pub transfer_progress_total: u64,
+    pub transfer_progress_is_send: bool,
+
     /// File browser popup (for choosing save directory).
     pub file_browser_visible: bool,
     pub file_browser_path: PathBuf,
@@ -301,6 +309,12 @@ impl App {
             file_receive_filename: String::new(),
             file_receive_size: 0,
             file_receive_code: String::new(),
+            transfer_progress_visible: false,
+            transfer_progress_nick: String::new(),
+            transfer_progress_filename: String::new(),
+            transfer_progress_bytes: 0,
+            transfer_progress_total: 0,
+            transfer_progress_is_send: false,
             file_browser_visible: false,
             file_browser_path: PathBuf::new(),
             file_browser_entries: Vec::new(),

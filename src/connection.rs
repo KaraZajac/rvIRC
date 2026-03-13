@@ -47,6 +47,16 @@ pub enum IrcMessage {
         frames: Vec<image::DynamicImage>,
         delays: Vec<std::time::Duration>,
     },
+    /// Wormhole transfer progress (bytes done, total). Throttled in callback.
+    TransferProgress {
+        nick: String,
+        filename: String,
+        bytes: u64,
+        total: u64,
+        is_send: bool,
+    },
+    /// Wormhole transfer finished (success or failure). Hides progress popup.
+    TransferComplete { nick: String, filename: String, is_send: bool, success: bool },
 }
 
 fn server_entry_to_irc_config(entry: &ServerEntry, rv: &RvConfig) -> IrcConfig {

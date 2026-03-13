@@ -158,6 +158,17 @@ fn main() -> Result<(), String> {
                         last_advance: std::time::Instant::now(),
                     });
                 }
+                M::TransferProgress { nick, filename, bytes, total, is_send } => {
+                    app.transfer_progress_visible = true;
+                    app.transfer_progress_nick = nick.clone();
+                    app.transfer_progress_filename = filename.clone();
+                    app.transfer_progress_bytes = *bytes;
+                    app.transfer_progress_total = *total;
+                    app.transfer_progress_is_send = *is_send;
+                }
+                M::TransferComplete { .. } => {
+                    app.transfer_progress_visible = false;
+                }
                 _ => {}
             }
             apply_irc_message(&mut app, msg, &irc_tx, &rt);
@@ -369,7 +380,7 @@ fn apply_irc_message(
             app.last_invite = Some((nick.clone(), channel.clone()));
             app.status_message = format!("{} invited you to {} (use :join {} to join)", nick, channel, channel);
         }
-        M::NickInUse | M::CtcpRequest { .. } | M::SendPrivmsg { .. } | M::Status(_) | M::ChatLog { .. } | M::ImageReady { .. } | M::AnimatedImageReady { .. } => {}
+        M::NickInUse | M::CtcpRequest { .. } | M::SendPrivmsg { .. } | M::Status(_) | M::ChatLog { .. } | M::ImageReady { .. } | M::AnimatedImageReady { .. } | M::TransferProgress { .. } | M::TransferComplete { .. } => {}
         M::Connected { server } => {
             app.current_server = Some(server);
             app.status_message = "Connected.".to_string();

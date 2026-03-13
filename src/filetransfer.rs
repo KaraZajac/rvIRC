@@ -2,6 +2,7 @@
 
 use crate::connection::IrcMessage;
 use futures_util::io::AllowStdIo;
+use std::sync::atomic::{AtomicU64, Ordering};
 use magic_wormhole::transit::Abilities;
 use magic_wormhole::{transfer, MailboxConnection, Wormhole};
 use std::path::Path;
@@ -60,20 +61,51 @@ pub async fn send_file(
     let buf = std::io::BufReader::new(f);
     let mut reader = AllowStdIo::new(buf);
 
-    #[allow(deprecated)]
-    transfer::send_file(
-        wormhole,
-        vec![],
-        &mut reader,
-        file_name.clone(),
-        file_size,
-        Abilities::ALL,
-        |_info| {},
-        |_sent, _total| {},
-        futures_util::future::pending(),
-    )
-    .await
-    .map_err(|e| format!("send: {}", e))?;
+    let last_pct = AtomicU64::new(0);
+    let tx_progress = tx.clone();
+    let nick_progress = nick.clone();
+    let filename_progress = file_name.clone();
+    let progress = move |bytes: u64, total: u64| {
+        if total == 0 { return; }
+        let pct = (bytes * 100) / total;
+        let prev = last_pct.load(Ordering::Relaxed);
+        if bytes == 0 || pct >= prev + 2 || bytes >= total {
+            last_pct.store(pct.min(100), Ordering::Relaxed);
+            let _ = tx_progress.send(IrcMessage::TransferProgress {
+                nick: nick_progress.clone(),
+                filename: filename_progress.clone(),
+                bytes,
+                total,
+                is_send: true,
+            });
+        }
+    };
+
+    let result = {
+        #[allow(deprecated)]
+        transfer::send_file(
+            wormhole,
+            vec![],
+            &mut reader,
+            file_name.clone(),
+            file_size,
+            Abilities::ALL,
+            |_info| {},
+            progress,
+            futures_util::future::pending(),
+        )
+        .await
+    };
+
+    let success = result.is_ok();
+    let _ = tx.send(IrcMessage::TransferComplete {
+        nick: nick.clone(),
+        filename: file_name.clone(),
+        is_send: true,
+        success,
+    });
+
+    result.map_err(|e| format!("send: {}", e))?;
 
     let _ = tx.send(IrcMessage::ChatLog {
         target: nick.clone(),
@@ -134,17 +166,52 @@ pub async fn receive_file(
         text: format!("Receiving file to {}...", save_path.display()),
     });
 
+    let filename_display = save_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+
     let file = std::fs::File::create(save_path).map_err(|e| format!("create file: {}", e))?;
     let mut writer = AllowStdIo::new(std::io::BufWriter::new(file));
 
-    req.accept(
-        |_info| {},
-        |_received, _total| {},
-        &mut writer,
-        futures_util::future::pending(),
-    )
-    .await
-    .map_err(|e| format!("receive: {}", e))?;
+    let last_pct = AtomicU64::new(0);
+    let tx_progress = tx.clone();
+    let nick_progress = nick.to_string();
+    let filename_progress = filename_display.clone();
+    let progress = move |received: u64, total: u64| {
+        if total == 0 { return; }
+        let pct = (received * 100) / total;
+        let prev = last_pct.load(Ordering::Relaxed);
+        if received == 0 || pct >= prev + 2 || received >= total {
+            last_pct.store(pct.min(100), Ordering::Relaxed);
+            let _ = tx_progress.send(IrcMessage::TransferProgress {
+                nick: nick_progress.clone(),
+                filename: filename_progress.clone(),
+                bytes: received,
+                total,
+                is_send: false,
+            });
+        }
+    };
+
+    let result = req
+        .accept(
+            |_info| {},
+            progress,
+            &mut writer,
+            futures_util::future::pending(),
+        )
+        .await;
+
+    let success = result.is_ok();
+    let _ = tx.send(IrcMessage::TransferComplete {
+        nick: nick.to_string(),
+        filename: filename_display,
+        is_send: false,
+        success,
+    });
+
+    result.map_err(|e| format!("receive: {}", e))?;
 
     let _ = tx.send(IrcMessage::ChatLog {
         target: nick.to_string(),

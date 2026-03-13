@@ -6,7 +6,7 @@ use crate::app::{App, MessageKind, MessageLine, Mode, PanelFocus, UserAction};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 use ratatui_image::StatefulImage;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -108,6 +108,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     if app.secure_accept_popup_visible {
         draw_secure_accept_popup(f, area, app);
+    }
+
+    if app.transfer_progress_visible {
+        draw_transfer_progress_popup(f, area, app);
     }
 
     if app.file_browser_visible {
@@ -958,6 +962,70 @@ fn draw_file_receive_popup(f: &mut Frame, area: Rect, app: &App) {
     let hint = Paragraph::new("y / Enter: Accept | n / Esc: Reject")
         .style(popup_style.add_modifier(Modifier::DIM));
     f.render_widget(hint, chunks[1]);
+}
+
+fn draw_transfer_progress_popup(f: &mut Frame, area: Rect, app: &App) {
+    let popup_width = 50;
+    let popup_height = 8;
+    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
+    let popup_rect = Rect { x, y, width: popup_width, height: popup_height };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(2), Constraint::Length(2), Constraint::Length(1)])
+        .margin(1)
+        .split(popup_rect);
+
+    f.render_widget(Clear, popup_rect);
+    let popup_style = popup_overlay_style();
+    let title = if app.transfer_progress_is_send {
+        " Sending "
+    } else {
+        " Receiving "
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .style(popup_style);
+    f.render_widget(block, popup_rect);
+
+    let size_display = if app.transfer_progress_total >= 1_048_576 {
+        format!("{:.1} / {:.1} MB",
+            app.transfer_progress_bytes as f64 / 1_048_576.0,
+            app.transfer_progress_total as f64 / 1_048_576.0)
+    } else if app.transfer_progress_total >= 1024 {
+        format!("{:.1} / {:.1} KB",
+            app.transfer_progress_bytes as f64 / 1024.0,
+            app.transfer_progress_total as f64 / 1024.0)
+    } else {
+        format!("{} / {} B", app.transfer_progress_bytes, app.transfer_progress_total)
+    };
+
+    let text = format!(
+        "{} → {}\n{}\n",
+        if app.transfer_progress_is_send { "To" } else { "From" },
+        app.transfer_progress_nick,
+        app.transfer_progress_filename
+    );
+    let para = Paragraph::new(text)
+        .style(popup_style)
+        .wrap(Wrap { trim: true });
+    f.render_widget(para, chunks[0]);
+
+    let pct = if app.transfer_progress_total > 0 {
+        ((app.transfer_progress_bytes as f64 / app.transfer_progress_total as f64) * 100.0) as u16
+    } else {
+        0
+    };
+    let gauge = Gauge::default()
+        .gauge_style(Style::default().fg(Color::Green))
+        .percent(pct.min(100));
+    f.render_widget(gauge, chunks[1]);
+
+    let info = Paragraph::new(size_display)
+        .style(popup_style.add_modifier(Modifier::DIM));
+    f.render_widget(info, chunks[2]);
 }
 
 fn draw_file_browser_popup(f: &mut Frame, area: Rect, app: &App) {
