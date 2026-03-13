@@ -42,6 +42,7 @@ Type `:` to enter COMMAND mode, then run any of these (case-insensitive):
 | `me <action text>` | Send an action (/me) to the current channel or DM |
 | `nick <newnick>` | Change your nickname |
 | `topic` | Show current channel topic; `topic <text>` to set it (if op) |
+| `whois [nick]` | Show whois info; omit nick to use current DM window |
 | `kick [channel] <nick> [reason]` | Kick user from channel |
 | `ban [channel] <mask>` | Set ban mask on channel (e.g. `*!*@host` or `nick!*@*`) |
 | `channel #chan` / `chan` / `c #chan` | Switch to channel/DM by name |

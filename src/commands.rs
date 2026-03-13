@@ -31,6 +31,7 @@ pub enum CommandResult {
     Version,
     Credits,
     License,
+    Whois(String), // nick, empty = default to current DM target
     Secure(String),
     Unsecure(String),
     Verify(String),
@@ -173,6 +174,10 @@ pub fn parse(line: &str) -> CommandResult {
         "version" => CommandResult::Version,
         "credits" => CommandResult::Credits,
         "license" => CommandResult::License,
+        "whois" => {
+            let nick = rest.split_whitespace().next().unwrap_or("").to_string();
+            CommandResult::Whois(nick)
+        }
         "secure" => {
             let nick = rest.split_whitespace().next().unwrap_or("").to_string();
             CommandResult::Secure(nick)

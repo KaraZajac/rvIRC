@@ -1334,6 +1334,34 @@ fn run_command(
         R::License => {
             app.license_popup_visible = true;
         }
+        R::Whois(nick) => {
+            let target = if nick.is_empty() {
+                app.current_channel.as_ref().and_then(|c| {
+                    if c.starts_with('#') || c.starts_with('&') {
+                        None
+                    } else {
+                        Some(c.clone())
+                    }
+                })
+            } else {
+                Some(nick)
+            };
+            match target {
+                Some(n) if !n.is_empty() => {
+                    if let Some(ref c) = client {
+                        let _ = c.send(IrcCommand::WHOIS(None, n.clone()));
+                        app.whois_popup_visible = true;
+                        app.whois_nick = n;
+                        app.whois_lines = vec!["Requesting whois...".to_string()];
+                    } else {
+                        app.status_message = "Not connected.".to_string();
+                    }
+                }
+                _ => {
+                    app.status_message = "Usage: :whois <nick> or use in a DM window".to_string();
+                }
+            }
+        }
         R::FocusUsers => {
             if app.user_panel_visible {
                 app.panel_focus = PanelFocus::Users;
