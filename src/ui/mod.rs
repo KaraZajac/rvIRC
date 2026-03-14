@@ -421,7 +421,7 @@ fn draw_input_bar(f: &mut Frame, area: Rect, app: &App) {
         let after = app.input.get(app.input_cursor..).unwrap_or("");
         Line::from(vec![
             Span::raw(before),
-            Span::styled("▌", Style::default().add_modifier(Modifier::REVERSED)),
+            Span::styled("|", Style::default()),
             Span::raw(after),
         ])
     } else {
