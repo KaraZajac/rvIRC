@@ -26,6 +26,7 @@ use irc::proto::Command as IrcCommand;
 use irc::proto::{ChannelMode as IrcChannelMode, Message as IrcProtoMessage, Mode as IrcMode};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
@@ -61,8 +62,7 @@ fn main() -> Result<(), String> {
         app.read_markers_path = Some(config_dir.join("read_markers.toml"));
     }
 
-    let mut client: Option<Client> = None;
-    let mut stream_handle: Option<tokio::task::JoinHandle<()>> = None;
+    let mut clients: HashMap<String, (Client, tokio::task::JoinHandle<()>)> = HashMap::new();
 
     let picker = ratatui_image::picker::Picker::from_query_stdio()
         .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
@@ -73,35 +73,36 @@ fn main() -> Result<(), String> {
     loop {
         terminal.draw(|f| ui::draw(f, &mut app)).map_err(|e| e.to_string())?;
 
-        // Auto-connect once on startup if a server has auto_connect = "yes"
-        if !auto_connect_attempted && client.is_none() {
+        // Auto-connect once on startup to all servers with auto_connect = "yes"
+        if !auto_connect_attempted && clients.is_empty() {
             auto_connect_attempted = true;
-            if let Some(server) = config.servers.iter().find(|s| s.is_auto_connect()) {
+            let auto_connect_servers: Vec<_> = config.servers.iter().filter(|s| s.is_auto_connect()).collect();
+            for server in auto_connect_servers {
                 match connect(server, &config, irc_tx.clone(), &rt) {
                     Ok((c, stream)) => {
+                        let name = server.name.clone();
+                        let name_for_spawn = name.clone();
                         let tx = irc_tx.clone();
                         let our_nick = config.nickname.clone();
                         let handle = rt.spawn(async move {
-                            run_stream(stream, tx, our_nick).await;
+                            run_stream(stream, tx, name_for_spawn, our_nick).await;
                         });
-                        stream_handle = Some(handle);
-                        client = Some(c);
+                        clients.insert(name.clone(), (c, handle));
+                        if app.current_server.is_none() {
+                            app.current_server = Some(name.clone());
+                            app.current_channel = Some("*server*".to_string());
+                            app.mark_target_read(&name, "*server*");
+                            app.channel_index = 0;
+                        }
                         app.current_nickname = config.nickname.clone();
-                        app.current_channel = Some("*server*".to_string());
-                        app.mark_target_read("*server*");
-                        app.channel_index = 0;
-                        app.status_message = format!("Auto-connecting to {}...", server.name);
+                        app.status_message = format!("Auto-connecting to {}...", name);
                         if server.sasl_mechanism.is_none() {
                             if let Some(ref pw) = server.identify_password {
-                                if let Some(ref c) = client {
+                                if let Some((ref c, _)) = clients.get(name.as_str()) {
                                     let _ = c.send_privmsg("NickServ", &format!("IDENTIFY {}", pw));
                                 }
-                                app.auto_join_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
-                            } else {
-                                app.auto_join_after = None;
+                                app.auto_join_after_per_server.insert(name.clone(), std::time::Instant::now() + std::time::Duration::from_secs(2));
                             }
-                        } else {
-                            app.auto_join_after = None;
                         }
                     }
                     Err(e) => {
@@ -115,8 +116,8 @@ fn main() -> Result<(), String> {
         while let Ok(msg) = irc_rx.try_recv() {
             use connection::IrcMessage as M;
             match &msg {
-                M::CtcpRequest { from_nick, tag, data, .. } => {
-                    if let Some(ref c) = client {
+                M::CtcpRequest { server, from_nick, tag, data, .. } => {
+                    if let Some((ref c, _)) = clients.get(server.as_str()) {
                         let reply = match tag.as_str() {
                             "VERSION" => "VERSION rvIRC 0.1".to_string(),
                             "PING" => data.clone(),
@@ -134,8 +135,8 @@ fn main() -> Result<(), String> {
                         }
                     }
                 }
-                M::NickInUse => {
-                    if let Some(ref c) = client {
+                M::NickInUse { server } => {
+                    if let Some((ref c, _)) = clients.get(server.as_str()) {
                         if let Some(ref alt) = config.alt_nick {
                             let _ = c.send(IrcCommand::NICK(alt.clone()));
                             app.status_message = format!("Nick in use, trying {}...", alt);
@@ -144,16 +145,17 @@ fn main() -> Result<(), String> {
                         }
                     }
                 }
-                M::SendPrivmsg { ref target, ref text } => {
-                    if let Some(ref c) = client {
+                M::SendPrivmsg { server, target, text } => {
+                    if let Some((ref c, _)) = clients.get(server.as_str()) {
                         for chunk in format::split_message_for_irc(text, format::MAX_MESSAGE_BYTES) {
                             let _ = c.send_privmsg(target, &chunk);
                         }
                     }
                 }
-                M::SendPrivmsgOrEncrypt { ref target, ref text } => {
-                    if let Some(ref c) = client {
-                        if let Some(session) = app.secure_sessions.get_mut(target) {
+                M::SendPrivmsgOrEncrypt { server, target, text } => {
+                    let sec_key = app::msg_key(server, target);
+                    if let Some((ref c, _)) = clients.get(server.as_str()) {
+                        if let Some(session) = app.secure_sessions.get_mut(&sec_key) {
                             for chunk in format::split_message_for_irc(text, format::MAX_ENCRYPTED_PLAINTEXT_BYTES) {
                                 match session.encrypt(&chunk) {
                                     Ok((nonce, ct)) => {
@@ -175,8 +177,9 @@ fn main() -> Result<(), String> {
                 M::Status(ref s) => {
                     app.status_message = s.clone();
                 }
-                M::ChatLog { ref target, ref text } => {
+                M::ChatLog { server, target, text } => {
                     app.push_message(
+                        server,
                         target,
                         MessageLine {
                             source: "***".to_string(),
@@ -203,7 +206,7 @@ fn main() -> Result<(), String> {
                         last_advance: std::time::Instant::now(),
                     });
                 }
-                M::TransferProgress { nick, filename, bytes, total, is_send } => {
+                M::TransferProgress { server: _, nick, filename, bytes, total, is_send } => {
                     app.transfer_progress_visible = true;
                     app.transfer_progress_nick = nick.clone();
                     app.transfer_progress_filename = filename.clone();
@@ -214,26 +217,32 @@ fn main() -> Result<(), String> {
                 M::TransferComplete { .. } => {
                     app.transfer_progress_visible = false;
                 }
-                M::RequestChathistory { ref target } => {
-                    if let Some(ref c) = client {
+                M::RequestChathistory { server, target } => {
+                    if let Some((ref c, _)) = clients.get(server.as_str()) {
                         let _ = c.send(IrcCommand::Raw(
                             "CHATHISTORY".to_string(),
                             vec!["LATEST".to_string(), target.clone(), "*".to_string(), "50".to_string()],
                         ));
                     }
                 }
-                M::ChathistoryBatch { ref target, ref lines } => {
-                    let buf = app.messages.entry(target.clone()).or_default();
+                M::ChathistoryBatch { server, target, lines } => {
+                    let key = app::msg_key(server, target);
+                    let buf = app.messages.entry(key).or_default();
                     for line in lines.iter().rev() {
                         buf.insert(0, line.clone());
                     }
                 }
                 _ => {}
             }
-            let was_connected = matches!(&msg, M::Connected { .. });
+            let _was_connected = matches!(&msg, M::Connected { .. });
+            let connected_server = if let M::Connected { ref server } = &msg {
+                Some(server.clone())
+            } else {
+                None
+            };
             apply_irc_message(&mut app, msg, &irc_tx, &rt);
-            if was_connected {
-                if let Some(ref c) = client {
+            if let Some(server) = connected_server {
+                if let Some((ref c, _)) = clients.get(server.as_str()) {
                     for nick in &app.friends_list {
                         let _ = c.send(IrcCommand::MONITOR("+".to_string(), Some(nick.clone())));
                     }
@@ -242,41 +251,49 @@ fn main() -> Result<(), String> {
         }
 
         if !app.protocol_events.is_empty() {
-            process_protocol_events(&mut app, &mut client, &rt, &irc_tx);
+            process_protocol_events(&mut app, &clients, &rt, &irc_tx);
         }
 
-        // Auto-join channels after connect: identify first, then join (delay when we identified)
-        if app.pending_auto_join {
-            let can_join = app.auto_join_after.map_or(true, |t| std::time::Instant::now() >= t);
+        // Auto-join channels after connect: per-server, identify first then join (delay when we identified)
+        let mut joined_any = false;
+        let pending: Vec<_> = app.pending_auto_join_servers.iter().cloned().collect();
+        for server_name in pending {
+            let can_join = app.auto_join_after_per_server
+                .get(&server_name)
+                .map_or(true, |t| std::time::Instant::now() >= *t);
             if can_join {
-                app.pending_auto_join = false;
-                app.auto_join_after = None;
-                if let (Some(ref c), Some(ref server_name)) = (client.as_ref(), app.current_server.as_ref()) {
-                    if let Some(server) = config.server_by_name(server_name) {
-                        let channels = server.auto_join_channels();
-                        for ch in &channels {
-                            let _ = c.send_join(ch);
-                            let _ = c.send_topic(ch, "");
-                            if !app.channel_list.contains(ch) {
-                                app.channel_list.push(ch.clone());
-                            }
+                app.pending_auto_join_servers.remove(&server_name);
+                app.auto_join_after_per_server.remove(&server_name);
+                if let (Some((ref c, _)), Some(server)) = (clients.get(server_name.as_str()), config.server_by_name(&server_name)) {
+                    let channels = server.auto_join_channels();
+                    for ch in &channels {
+                        let _ = c.send_join(ch);
+                        let _ = c.send_topic(ch, "");
+                        let chans = app.channels_per_server.entry(server_name.clone()).or_default();
+                        if !chans.contains(ch) {
+                            chans.push(ch.clone());
                         }
-                        if let Some(first) = channels.first() {
+                    }
+                    if let Some(first) = channels.first() {
+                        if app.current_server.as_deref() == Some(server_name.as_str()) {
                             app.current_channel = Some(first.clone());
-                            app.mark_target_read(first);
+                            app.mark_target_read(&server_name, first);
                             app.sync_channel_index_to_current();
                         }
-                        if !channels.is_empty() {
-                            app.status_message = format!("Joined {} channel(s).", channels.len());
-                        }
+                    }
+                    if !channels.is_empty() {
+                        joined_any = true;
+                        app.status_message = format!("Joined {} channel(s) on {}.", channels.len(), server_name);
                     }
                 }
             }
         }
+        if joined_any {
+            app.clamp_channel_index();
+        }
 
         // Auto-reconnect: 3 attempts at 5s, 15s, 30s after disconnect
-        if client.is_none()
-            && app.reconnect_after.is_some()
+        if app.reconnect_after.is_some()
             && std::time::Instant::now() >= app.reconnect_after.unwrap()
         {
             let server_name = app.reconnect_server.clone();
@@ -286,28 +303,26 @@ fn main() -> Result<(), String> {
                     app.status_message = format!("Reconnecting to {} (attempt {})...", server_name, app.reconnect_attempt);
                     match connect(server, &config, irc_tx.clone(), &rt) {
                         Ok((c, stream)) => {
+                            let name = server_name.clone();
+                            let name_for_spawn = name.clone();
                             let tx = irc_tx.clone();
                             let our_nick = config.nickname.clone();
-                            let handle = rt.spawn(async move { run_stream(stream, tx, our_nick).await });
-                            stream_handle = Some(handle);
-                            client = Some(c);
+                            let handle = rt.spawn(async move { run_stream(stream, tx, name_for_spawn, our_nick).await });
+                            clients.insert(name.clone(), (c, handle));
+                            app.current_server = Some(name.clone());
                             app.current_nickname = config.nickname.clone();
                             app.current_channel = Some("*server*".to_string());
-                            app.mark_target_read("*server*");
+                            app.mark_target_read(&name, "*server*");
                             app.channel_index = 0;
                             app.clear_reconnect();
                             if server.sasl_mechanism.is_none() {
                                 if let Some(ref pw) = server.identify_password {
-                                    if let Some(ref c) = client {
+                                    if let Some((ref c, _)) = clients.get(name.as_str()) {
                                         let _ = c.send_privmsg("NickServ", &format!("IDENTIFY {}", pw));
                                         app.status_message = "Identifying with NickServ...".to_string();
                                     }
-                                    app.auto_join_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
-                                } else {
-                                    app.auto_join_after = None;
+                                    app.auto_join_after_per_server.insert(name.clone(), std::time::Instant::now() + std::time::Duration::from_secs(2));
                                 }
-                            } else {
-                                app.auto_join_after = None;
                             }
                             app.status_message = format!("Reconnected to {}.", server_name);
                         }
@@ -350,8 +365,7 @@ fn main() -> Result<(), String> {
             let quit = handle_key_action(
                 &mut app,
                 &config,
-                &mut client,
-                &mut stream_handle,
+                &mut clients,
                 &irc_tx,
                 &rt,
                 action,
@@ -363,20 +377,18 @@ fn main() -> Result<(), String> {
     }
 
     // Clean disconnect so the server and other users see a proper QUIT (not just connection closed)
-    if let Some(c) = client.take() {
+    for (_, (c, h)) in std::mem::take(&mut clients) {
         let _ = c.send_quit("Leaving");
-        std::thread::sleep(std::time::Duration::from_millis(250));
-    }
-    if let Some(h) = stream_handle.take() {
         h.abort();
     }
+    std::thread::sleep(std::time::Duration::from_millis(250));
 
     restore_terminal().map_err(|e| e.to_string())?;
     Ok(())
 }
 
 /// Send IRCv3 typing indicator (TAGMSG with +typing=active|done). Throttles active to once per 3s.
-fn send_typing_indicator(app: &mut App, client: &Option<Client>, status: &str) {
+fn send_typing_indicator(app: &mut App, clients: &HashMap<String, (Client, tokio::task::JoinHandle<()>)>, status: &str) {
     let target = match app.current_channel.as_deref() {
         Some(t) if t != "*server*" => t,
         _ => {
@@ -386,8 +398,8 @@ fn send_typing_indicator(app: &mut App, client: &Option<Client>, status: &str) {
             return;
         }
     };
-    let c = match client {
-        Some(c) => c,
+    let c = match app.current_server.as_ref().and_then(|s| clients.get(s)) {
+        Some((c, _)) => c,
         None => {
             if std::env::var("RVIRC_DEBUG_TYPING").is_ok() {
                 app.status_message = "typing skip: not connected".to_string();
@@ -395,16 +407,18 @@ fn send_typing_indicator(app: &mut App, client: &Option<Client>, status: &str) {
             return;
         }
     };
+    let server = app.current_server.as_deref().unwrap_or("");
+    let key = app::msg_key(server, target);
     if status == "active" {
         let now = std::time::Instant::now();
-        if let Some(&last) = app.last_typing_sent.get(target) {
+        if let Some(&last) = app.last_typing_sent.get(&key) {
             if now.duration_since(last).as_secs() < 3 {
                 return; // throttle: 3s between active, no status spam
             }
         }
-        app.last_typing_sent.insert(target.to_string(), now);
+        app.last_typing_sent.insert(key.clone(), now);
     } else if status == "done" {
-        app.last_typing_sent.remove(target);
+        app.last_typing_sent.remove(&key);
     }
     let tags = Some(vec![Tag("+typing".to_string(), Some(status.to_string()))]);
     match IrcProtoMessage::with_tags(tags, None, "TAGMSG", vec![target]) {
@@ -427,15 +441,17 @@ fn apply_irc_message(
     irc_tx: &IrcMessageTx,
     rt: &tokio::runtime::Runtime,
 ) {
+    use app::msg_key;
     use connection::IrcMessage as M;
     match msg {
-        M::Line { target, mut line } => {
+        M::Line { server, target, mut line } => {
             if line.text.starts_with("[:rvIRC:") {
                 if let Some(evt) = parse_rvirc_protocol(&line.source, &line.text) {
                     app.protocol_events.push(evt);
                 }
-                if !app.dm_targets.contains(&line.source) {
-                    app.dm_targets.push(line.source.clone());
+                let dms = app.dm_targets_per_server.entry(server.to_string()).or_default();
+                if !dms.contains(&line.source) {
+                    dms.push(line.source.clone());
                 }
                 return;
             }
@@ -448,28 +464,30 @@ fn apply_irc_message(
                 }
             }
             let (effective_target, source, text) = if target == app.current_nickname.as_deref().unwrap_or("") {
-                if !app.dm_targets.contains(&line.source) {
-                    app.dm_targets.push(line.source.clone());
+                let dms = app.dm_targets_per_server.entry(server.to_string()).or_default();
+                if !dms.contains(&line.source) {
+                    dms.push(line.source.clone());
                 }
-                app.push_message(&line.source, line.clone());
+                app.push_message(&server, &line.source, line.clone());
                 (line.source.clone(), line.source.clone(), line.text.clone())
             } else {
-                app.push_message(&target, line.clone());
+                app.push_message(&server, &target, line.clone());
                 (target.clone(), line.source.clone(), line.text.clone())
             };
-            // Clear typing when user sends a message (for DMs, typing is stored as (nick, our_nick))
-            app.typing_status.remove(&(source.clone(), effective_target.clone()));
+            app.typing_status.remove(&(server.clone(), source.clone(), effective_target.clone()));
             if let Some(ref our_nick) = app.current_nickname {
-                app.typing_status.remove(&(source.clone(), our_nick.clone()));
+                app.typing_status.remove(&(server.clone(), source.clone(), our_nick.clone()));
             }
             if line.kind == MessageKind::Quit {
-                app.typing_status.retain(|(n, _), _| n != &source);
+                app.typing_status.retain(|(_, n, _), _| n != &source);
             } else if line.kind == MessageKind::Part {
-                app.typing_status.remove(&(source.clone(), effective_target.clone()));
+                app.typing_status.remove(&(server.clone(), source.clone(), effective_target.clone()));
             }
-            // Notify when message is for a different buffer than we're viewing
-            let current = app.current_channel.as_deref().unwrap_or("");
-            if effective_target != current && !app.is_muted(&effective_target, &source) {
+            let current_key = app.current_server.as_ref().and_then(|s| {
+                app.current_channel.as_ref().map(|t| msg_key(s, t))
+            }).unwrap_or_default();
+            let key = msg_key(&server, &effective_target);
+            if key != current_key && !app.is_muted(&key, &source) {
                 let preview = format!("{}: {}", source, text);
                 let preview = preview.chars().take(80).collect::<String>();
                 if app.notifications_enabled {
@@ -480,89 +498,95 @@ fn apply_irc_message(
                 }
             }
         }
-        M::JoinedChannel(ch) => {
-            if !app.channel_list.contains(&ch) {
-                app.channel_list.push(ch.clone());
+        M::JoinedChannel { server, channel } => {
+            let chans = app.channels_per_server.entry(server).or_default();
+            if !chans.contains(&channel) {
+                chans.push(channel);
             }
         }
-        M::PartedChannel(ch) => {
-            app.channel_list.retain(|c| c != &ch);
+        M::PartedChannel { server, channel } => {
+            if let Some(chans) = app.channels_per_server.get_mut(&server) {
+                chans.retain(|c| c != &channel);
+            }
             app.clamp_channel_index();
-            if app.current_channel.as_deref() == Some(ch.as_str()) {
+            if app.current_server.as_deref() == Some(server.as_str()) && app.current_channel.as_deref() == Some(channel.as_str()) {
                 app.save_current_read_marker();
-                app.current_channel = app.selected_target();
-                if let Some(t) = app.current_channel.clone() {
-                    app.restore_read_marker_for(&t);
-                    app.mark_target_read(&t);
+                if let Some((s, t)) = app.selected_channel_entry().or_else(|| app.selected_message_entry()) {
+                    app.current_server = Some(s.clone());
+                    app.current_channel = Some(t.clone());
+                    app.restore_read_marker_for(&s, &t);
+                    app.mark_target_read(&s, &t);
                 }
             }
         }
-        M::UserList { channel, users } => {
-            if app.current_channel.as_deref() == Some(channel.as_str()) {
+        M::UserList { server, channel, users } => {
+            if app.current_server.as_deref() == Some(server.as_str()) && app.current_channel.as_deref() == Some(channel.as_str()) {
                 app.set_user_list(users);
             }
         }
-        M::ChannelList(channels) => {
-            let mut list = channels;
+        M::ChannelList { server: _server, list } => {
+            let mut list = list;
             list.sort_by(|a, b| b.1.unwrap_or(0).cmp(&a.1.unwrap_or(0)));
             app.server_channel_list = list;
             app.clamp_channel_list_selected_index();
             app.status_message = format!("{} channels", app.server_channel_list.len());
         }
-        M::WhoisResult { nick, lines } => {
+        M::WhoisResult { server: _server, nick, lines } => {
             app.whois_nick = nick;
             app.whois_lines = lines;
             app.whois_popup_visible = true;
         }
-        M::Topic { channel, topic } => {
-            app.channel_topics.insert(channel.clone(), topic.unwrap_or_default());
+        M::Topic { server, channel, topic } => {
+            let key = msg_key(&server, &channel);
+            app.channel_topics.insert(key, topic.unwrap_or_default());
         }
-        M::ChannelModes { channel, modes } => {
-            app.channel_modes.insert(channel, modes);
+        M::ChannelModes { server, channel, modes } => {
+            let key = msg_key(&server, &channel);
+            app.channel_modes.insert(key, modes);
         }
-        M::Invite { nick, channel } => {
+        M::Invite { server: _server, nick, channel } => {
             app.last_invite = Some((nick.clone(), channel.clone()));
             app.status_message = format!("{} invited you to {} (use :join {} to join)", nick, channel, channel);
         }
-        M::Typing { nick, target, status } => {
+        M::Typing { server, nick, target, status } => {
             if std::env::var("RVIRC_DEBUG_TYPING").is_ok() {
                 app.status_message = format!("typing stored: {} in {} = {}", nick, target, status);
             }
             if status == "done" {
-                app.typing_status.remove(&(nick, target));
+                app.typing_status.remove(&(server, nick, target));
             } else {
-                app.typing_status.insert((nick, target), (status, std::time::Instant::now()));
+                app.typing_status.insert((server, nick, target), (status, std::time::Instant::now()));
             }
         }
-        M::CapRequested(caps) => {
-            app.requested_caps = caps;
+        M::CapRequested { server, caps } => {
+            app.requested_caps_per_server.insert(server, caps);
         }
-        M::CapsAcked(caps) => {
+        M::CapsAcked { server, caps } => {
+            let set = app.acked_caps_per_server.entry(server).or_default();
             for c in caps {
-                app.acked_caps.insert(c);
+                set.insert(c);
             }
             if std::env::var("RVIRC_DEBUG_TYPING").is_ok() {
-                let has_mt = app.acked_caps.contains("message-tags");
-                app.status_message = format!("caps acked: message-tags={} total={}", has_mt, app.acked_caps.len());
+                let has_mt = app.current_server.as_ref().and_then(|s| app.acked_caps_per_server.get(s))
+                    .map(|m| m.contains("message-tags")).unwrap_or(false);
+                app.status_message = format!("caps acked: message-tags={}", has_mt);
             }
         }
-        M::CapsNak(_) => {
-            // NAK'd caps stay out of acked_caps; :caps infers from requested - acked
-        }
-        M::NickInUse | M::CtcpRequest { .. } | M::SendPrivmsg { .. } | M::SendPrivmsgOrEncrypt { .. } | M::Status(_) | M::ChatLog { .. } | M::ImageReady { .. } | M::AnimatedImageReady { .. } | M::TransferProgress { .. } | M::TransferComplete { .. } => {}
-        M::MonOnline { nicks } => {
+        M::CapsNak { .. } => {}
+        M::NickInUse { .. } | M::CtcpRequest { .. } | M::SendPrivmsg { .. } | M::SendPrivmsgOrEncrypt { .. } | M::Status(_) | M::ChatLog { .. } | M::ImageReady { .. } | M::AnimatedImageReady { .. } | M::TransferProgress { .. } | M::TransferComplete { .. } => {}
+        M::MonOnline { server: _server, nicks } => {
             for n in nicks {
                 app.friends_online.insert(n);
             }
         }
-        M::MonOffline { nicks } => {
+        M::MonOffline { server: _server, nicks } => {
             for n in nicks {
                 app.friends_online.remove(&n);
                 app.friends_away.remove(&n);
             }
             app.clamp_friends_index();
         }
-        M::FriendAway { nick, away } => {
+        M::FriendAway { server: _server, nick, away } => {
             if app.friends_list.iter().any(|n| n.eq_ignore_ascii_case(&nick)) {
                 if let Some(existing) = app.friends_away.iter().find(|a| a.eq_ignore_ascii_case(&nick)).cloned() {
                     app.friends_away.remove(&existing);
@@ -573,7 +597,12 @@ fn apply_irc_message(
             }
         }
         M::Connected { server } => {
-            app.current_server = Some(server.clone());
+            if !app.connected_servers.contains(&server) {
+                app.connected_servers.push(server.clone());
+            }
+            if app.current_server.is_none() {
+                app.current_server = Some(server.clone());
+            }
             app.friends_online.clear();
             app.friends_away.clear();
             if let Some(ref path) = app.friends_path {
@@ -582,19 +611,38 @@ fn apply_irc_message(
                 app.clamp_friends_index();
             }
             app.status_message = "Connected.".to_string();
-            app.pending_auto_join = true;
+            app.pending_auto_join_servers.insert(server);
         }
-        M::Disconnected => {
-            let server_for_reconnect = app.current_server.clone();
-            app.current_server = None;
-            app.current_channel = None;
-            app.current_nickname = None;
-            app.unread_targets.clear();
-            app.unread_mentions.clear();
-            app.typing_status.clear();
-            app.last_typing_sent.clear();
-            app.channel_list.clear();
-            app.dm_targets.clear();
+        M::Disconnected { server } => {
+            let server_for_reconnect = server.clone();
+            app.connected_servers.retain(|s| s != &server);
+            app.channels_per_server.remove(&server);
+            app.dm_targets_per_server.remove(&server);
+            app.typing_status.retain(|(s, _, _), _| s != &server);
+            app.last_typing_sent.retain(|k, _| !k.starts_with(&format!("{}/", server)));
+            for k in app.messages.keys().cloned().collect::<Vec<_>>() {
+                if k.starts_with(&format!("{}/", server)) {
+                    app.messages.remove(&k);
+                }
+            }
+            app.unread_targets.retain(|k| !k.starts_with(&format!("{}/", server)));
+            app.unread_mentions.retain(|k| !k.starts_with(&format!("{}/", server)));
+            for k in app.channel_topics.keys().cloned().collect::<Vec<_>>() {
+                if k.starts_with(&format!("{}/", server)) {
+                    app.channel_topics.remove(&k);
+                }
+            }
+            for k in app.channel_modes.keys().cloned().collect::<Vec<_>>() {
+                if k.starts_with(&format!("{}/", server)) {
+                    app.channel_modes.remove(&k);
+                }
+            }
+            if app.current_server.as_deref() == Some(server.as_str()) {
+                app.current_server = app.connected_servers.first().cloned();
+                app.current_channel = app.current_server.as_ref().map(|_| "*server*".to_string());
+                app.sync_channel_index_to_current();
+            }
+            app.clamp_channel_index();
             app.clamp_messages_index();
             app.user_list.clear();
             app.search_popup_visible = false;
@@ -607,22 +655,18 @@ fn apply_irc_message(
             app.whois_popup_visible = false;
             app.whois_nick.clear();
             app.whois_lines.clear();
-            app.pending_auto_join = false;
-            app.auto_join_after = None;
-            app.channel_topics.clear();
-            app.channel_modes.clear();
+            app.pending_auto_join_servers.remove(&server);
+            app.auto_join_after_per_server.remove(&server);
             app.last_invite = None;
             app.friends_online.clear();
             app.friends_away.clear();
-            app.acked_caps.clear();
-            app.requested_caps.clear();
+            app.acked_caps_per_server.remove(&server);
+            app.requested_caps_per_server.remove(&server);
             app.away_message = None;
             app.status_message = "Disconnected.".to_string();
-            if let Some(server) = server_for_reconnect {
-                app.reconnect_server = Some(server);
-                app.reconnect_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
-                app.reconnect_attempt = 1;
-            }
+            app.reconnect_server = Some(server_for_reconnect);
+            app.reconnect_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
+            app.reconnect_attempt = 1;
         }
         M::RequestChathistory { .. } | M::ChathistoryBatch { .. } => {
             // Handled in the outer match block before apply_irc_message
@@ -654,8 +698,7 @@ fn input_next_char_boundary(s: &str, i: usize) -> usize {
 fn handle_key_action(
     app: &mut App,
     config: &RvConfig,
-    client: &mut Option<Client>,
-    stream_handle: &mut Option<tokio::task::JoinHandle<()>>,
+    clients: &mut HashMap<String, (Client, tokio::task::JoinHandle<()>)>,
     irc_tx: &IrcMessageTx,
     rt: &tokio::runtime::Runtime,
     action: KeyAction,
@@ -686,7 +729,7 @@ fn handle_key_action(
             if app.user_panel_visible {
                 app.panel_focus = PanelFocus::Users;
                 if app.current_channel.as_ref().map_or(false, |t| t.starts_with('#') || t.starts_with('&')) {
-                    request_channel_names(client, app);
+                    request_channel_names(clients, app);
                 }
             }
         }
@@ -709,16 +752,17 @@ fn handle_key_action(
             app.messages_index = app.messages_index.saturating_sub(1);
         }
         MessageDown => {
-            if app.messages_index + 1 < app.dm_targets.len() {
+            if app.messages_index + 1 < app.messages_list().len() {
                 app.messages_index += 1;
             }
         }
         MessageSelect => {
-            if let Some(nick) = app.messages_list().get(app.messages_index).cloned() {
+            if let Some((server, nick)) = app.messages_list().get(app.messages_index).cloned() {
                 app.save_current_read_marker();
+                app.current_server = Some(server.clone());
                 app.current_channel = Some(nick.clone());
-                app.mark_target_read(&nick);
-                app.restore_read_marker_for(&nick);
+                app.mark_target_read(&server, &nick);
+                app.restore_read_marker_for(&server, &nick);
                 app.panel_focus = PanelFocus::Main;
             }
         }
@@ -732,26 +776,32 @@ fn handle_key_action(
         }
         FriendSelect => {
             if let Some(nick) = app.selected_friend() {
-                if !app.dm_targets.contains(&nick) {
-                    app.dm_targets.push(nick.clone());
+                let server = app.current_server.as_ref().cloned().unwrap_or_default();
+                if server.is_empty() {
+                    return Ok(false);
+                }
+                let dms = app.dm_targets_per_server.entry(server.to_string()).or_default();
+                if !dms.contains(&nick) {
+                    dms.push(nick.clone());
                 }
                 app.save_current_read_marker();
                 app.current_channel = Some(nick.clone());
-                app.mark_target_read(&nick);
-                app.restore_read_marker_for(&nick);
+                app.mark_target_read(&server, &nick);
+                app.restore_read_marker_for(&server, &nick);
                 app.sync_channel_index_to_current();
                 app.panel_focus = PanelFocus::Main;
             }
         }
         ChannelSelect => {
-            if let Some(target) = app.channels_list().get(app.channel_index).cloned() {
+            if let Some((server, target)) = app.channels_list().get(app.channel_index).cloned() {
                 app.save_current_read_marker();
+                app.current_server = Some(server.clone());
                 app.current_channel = Some(target.clone());
-                app.mark_target_read(&target);
+                app.mark_target_read(&server, &target);
                 app.user_list.clear();
-                app.restore_read_marker_for(&target);
+                app.restore_read_marker_for(&server, &target);
                 if target.starts_with('#') || target.starts_with('&') {
-                    request_channel_names(client, app);
+                    request_channel_names(clients, app);
                 }
                 app.panel_focus = PanelFocus::Main;
             }
@@ -796,7 +846,7 @@ fn handle_key_action(
                     }
                     UserAction::Whois => {
                         app.user_action_menu = false;
-                        if let Some(ref c) = client {
+                        if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                             let _ = c.send(IrcCommand::WHOIS(None, nick.to_string()));
                             app.whois_popup_visible = true;
                             app.whois_nick = nick.to_string();
@@ -808,8 +858,8 @@ fn handle_key_action(
                     UserAction::Kick => {
                         app.user_action_menu = false;
                         if let Some(ref ch) = app.current_channel.as_ref() {
-                            if (ch.starts_with('#') || ch.starts_with('&')) && client.as_ref().is_some() {
-                                if let Some(ref c) = client {
+                            if (ch.starts_with('#') || ch.starts_with('&')) && app.current_server.as_ref().and_then(|s| clients.get(s)).is_some() {
+                                if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                                     let _ = c.send_kick(ch, &nick, "");
                                     app.status_message = format!("Kicked {} from {}", nick, ch);
                                 }
@@ -823,8 +873,8 @@ fn handle_key_action(
                     UserAction::Ban => {
                         app.user_action_menu = false;
                         if let Some(ref ch) = app.current_channel.as_ref() {
-                            if (ch.starts_with('#') || ch.starts_with('&')) && client.as_ref().is_some() {
-                                if let Some(ref c) = client {
+                            if (ch.starts_with('#') || ch.starts_with('&')) && app.current_server.as_ref().and_then(|s| clients.get(s)).is_some() {
+                                if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                                     let mask = format!("{}!*@*", nick);
                                     let _ = c.send_mode(ch, &[IrcMode::Plus(IrcChannelMode::Ban, Some(mask))]);
                                     app.status_message = format!("Ban set on {} for {}", ch, nick);
@@ -839,8 +889,8 @@ fn handle_key_action(
                     UserAction::Unban => {
                         app.user_action_menu = false;
                         if let Some(ref ch) = app.current_channel.as_ref() {
-                            if (ch.starts_with('#') || ch.starts_with('&')) && client.as_ref().is_some() {
-                                if let Some(ref c) = client {
+                            if (ch.starts_with('#') || ch.starts_with('&')) && app.current_server.as_ref().and_then(|s| clients.get(s)).is_some() {
+                                if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                                     let mask = format!("{}!*@*", nick);
                                     let _ = c.send_mode(ch, &[IrcMode::Minus(IrcChannelMode::Ban, Some(mask))]);
                                     app.status_message = format!("Unbanned {} on {}", nick, ch);
@@ -855,8 +905,8 @@ fn handle_key_action(
                     UserAction::Op => {
                         app.user_action_menu = false;
                         if let Some(ref ch) = app.current_channel.as_ref() {
-                            if (ch.starts_with('#') || ch.starts_with('&')) && client.as_ref().is_some() {
-                                if let Some(ref c) = client {
+                            if (ch.starts_with('#') || ch.starts_with('&')) && app.current_server.as_ref().and_then(|s| clients.get(s)).is_some() {
+                                if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                                     let _ = c.send_mode(ch, &[IrcMode::Plus(IrcChannelMode::Oper, Some(nick.clone()))]);
                                     app.status_message = format!("Opped {} on {}", nick, ch);
                                 }
@@ -870,8 +920,8 @@ fn handle_key_action(
                     UserAction::Deop => {
                         app.user_action_menu = false;
                         if let Some(ref ch) = app.current_channel.as_ref() {
-                            if (ch.starts_with('#') || ch.starts_with('&')) && client.as_ref().is_some() {
-                                if let Some(ref c) = client {
+                            if (ch.starts_with('#') || ch.starts_with('&')) && app.current_server.as_ref().and_then(|s| clients.get(s)).is_some() {
+                                if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                                     let _ = c.send_mode(ch, &[IrcMode::Minus(IrcChannelMode::Oper, Some(nick.clone()))]);
                                     app.status_message = format!("Deopped {} on {}", nick, ch);
                                 }
@@ -885,8 +935,8 @@ fn handle_key_action(
                     UserAction::Voice => {
                         app.user_action_menu = false;
                         if let Some(ref ch) = app.current_channel.as_ref() {
-                            if (ch.starts_with('#') || ch.starts_with('&')) && client.as_ref().is_some() {
-                                if let Some(ref c) = client {
+                            if (ch.starts_with('#') || ch.starts_with('&')) && app.current_server.as_ref().and_then(|s| clients.get(s)).is_some() {
+                                if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                                     let _ = c.send_mode(ch, &[IrcMode::Plus(IrcChannelMode::Voice, Some(nick.clone()))]);
                                     app.status_message = format!("Voiced {} on {}", nick, ch);
                                 }
@@ -900,8 +950,8 @@ fn handle_key_action(
                     UserAction::Devoice => {
                         app.user_action_menu = false;
                         if let Some(ref ch) = app.current_channel.as_ref() {
-                            if (ch.starts_with('#') || ch.starts_with('&')) && client.as_ref().is_some() {
-                                if let Some(ref c) = client {
+                            if (ch.starts_with('#') || ch.starts_with('&')) && app.current_server.as_ref().and_then(|s| clients.get(s)).is_some() {
+                                if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                                     let _ = c.send_mode(ch, &[IrcMode::Minus(IrcChannelMode::Voice, Some(nick.clone()))]);
                                     app.status_message = format!("Devoiced {} on {}", nick, ch);
                                 }
@@ -915,8 +965,8 @@ fn handle_key_action(
                     UserAction::Halfop => {
                         app.user_action_menu = false;
                         if let Some(ref ch) = app.current_channel.as_ref() {
-                            if (ch.starts_with('#') || ch.starts_with('&')) && client.as_ref().is_some() {
-                                if let Some(ref c) = client {
+                            if (ch.starts_with('#') || ch.starts_with('&')) && app.current_server.as_ref().and_then(|s| clients.get(s)).is_some() {
+                                if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                                     let _ = c.send_mode(ch, &[IrcMode::Plus(IrcChannelMode::Halfop, Some(nick.clone()))]);
                                     app.status_message = format!("Halfopped {} on {}", nick, ch);
                                 }
@@ -930,8 +980,8 @@ fn handle_key_action(
                     UserAction::Dehalfop => {
                         app.user_action_menu = false;
                         if let Some(ref ch) = app.current_channel.as_ref() {
-                            if (ch.starts_with('#') || ch.starts_with('&')) && client.as_ref().is_some() {
-                                if let Some(ref c) = client {
+                            if (ch.starts_with('#') || ch.starts_with('&')) && app.current_server.as_ref().and_then(|s| clients.get(s)).is_some() {
+                                if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                                     let _ = c.send_mode(ch, &[IrcMode::Minus(IrcChannelMode::Halfop, Some(nick.clone()))]);
                                     app.status_message = format!("Dehalfopped {} on {}", nick, ch);
                                 }
@@ -962,21 +1012,22 @@ fn handle_key_action(
             }
         }
         ListPopupSelect => {
-            if let Some(ch) = app.selected_list_channel() {
+            if let (Some(server), Some(ch)) = (app.current_server.clone(), app.selected_list_channel()) {
                 app.channel_list_popup_visible = false;
                 app.channel_list_filter.clear();
                 app.channel_list_scroll_mode = false;
-                if let Some(ref c) = client {
+                if let Some((ref c, _)) = clients.get(server.as_str()) {
                     c.send_join(&ch).map_err(|e| e.to_string())?;
                     let _ = c.send_topic(&ch, "");
-                    if !app.channel_list.contains(&ch) {
-                        app.channel_list.push(ch.clone());
+                    let chans = app.channels_per_server.entry(server.to_string()).or_default();
+                    if !chans.contains(&ch) {
+                        chans.push(ch.clone());
                     }
                     app.save_current_read_marker();
                     app.current_channel = Some(ch.clone());
-                    app.mark_target_read(&ch);
+                    app.mark_target_read(&server, &ch);
                     app.sync_channel_index_to_current();
-                    app.restore_read_marker_for(&ch);
+                    app.restore_read_marker_for(&server, &ch);
                     app.status_message = format!("Joined {}", ch);
                 }
             }
@@ -1031,41 +1082,40 @@ fn handle_key_action(
             if let Some(name) = app.selected_server_name() {
                 app.server_list_popup_visible = false;
                 if let Some(server) = config.server_by_name(&name) {
-                    app.clear_reconnect();
-                    if let Some(h) = stream_handle.take() {
-                        h.abort();
-                    }
-                    drop(client.take());
-                    match connect(server, config, irc_tx.clone(), rt) {
-                        Ok((c, stream)) => {
-                            let tx = irc_tx.clone();
-                            let our_nick = config.nickname.clone();
-                            let handle = rt.spawn(async move {
-                                run_stream(stream, tx, our_nick).await;
-                            });
-                            *stream_handle = Some(handle);
-                            *client = Some(c);
-                            app.current_nickname = config.nickname.clone();
-                            app.current_channel = Some("*server*".to_string());
-                            app.mark_target_read("*server*");
-                            app.channel_index = 0;
-                            if server.sasl_mechanism.is_none() {
-                                if let Some(ref pw) = server.identify_password {
-                                    if let Some(ref c) = client {
-                                        let _ = c.send_privmsg("NickServ", &format!("IDENTIFY {}", pw));
-                                        app.status_message = "Identifying with NickServ...".to_string();
-                                    }
-                                    app.auto_join_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
-                                } else {
-                                    app.auto_join_after = None;
+                    if clients.contains_key(&name) {
+                        app.status_message = format!("Already connected to {}.", name);
+                    } else {
+                        app.clear_reconnect();
+                        match connect(server, config, irc_tx.clone(), rt) {
+                            Ok((c, stream)) => {
+                                let name_for_spawn = name.clone();
+                                let tx = irc_tx.clone();
+                                let our_nick = config.nickname.clone();
+                                let handle = rt.spawn(async move {
+                                    run_stream(stream, tx, name_for_spawn, our_nick).await;
+                                });
+                                clients.insert(name.clone(), (c, handle));
+                                if app.current_server.is_none() {
+                                    app.current_server = Some(name.clone());
+                                    app.current_channel = Some("*server*".to_string());
+                                    app.mark_target_read(&name, "*server*");
+                                    app.channel_index = 0;
                                 }
-                            } else {
-                                app.auto_join_after = None;
+                                app.current_nickname = config.nickname.clone();
+                                if server.sasl_mechanism.is_none() {
+                                    if let Some(ref pw) = server.identify_password {
+                                        if let Some((ref c, _)) = clients.get(name.as_str()) {
+                                            let _ = c.send_privmsg("NickServ", &format!("IDENTIFY {}", pw));
+                                            app.status_message = "Identifying with NickServ...".to_string();
+                                        }
+                                        app.auto_join_after_per_server.insert(name.clone(), std::time::Instant::now() + std::time::Duration::from_secs(2));
+                                    }
+                                }
+                                app.status_message = format!("Connected to {}.", name);
                             }
-                            app.status_message = format!("Connected to {}.", name);
-                        }
-                        Err(e) => {
-                            app.status_message = e;
+                            Err(e) => {
+                                app.status_message = e;
+                            }
                         }
                     }
                 }
@@ -1221,7 +1271,7 @@ fn handle_key_action(
                         app.input_cursor += c.len_utf8();
                     }
                     if app.mode == Mode::Insert {
-                        send_typing_indicator(app, client, "active");
+                        send_typing_indicator(app, clients, "active");
                     }
                 }
             }
@@ -1254,7 +1304,7 @@ fn handle_key_action(
                     app.input_cursor += to_insert.len();
                 }
                 if app.mode == Mode::Insert {
-                    send_typing_indicator(app, client, "active");
+                    send_typing_indicator(app, clients, "active");
                 }
             }
         }
@@ -1428,18 +1478,19 @@ fn handle_key_action(
                 app.input_cursor = 0;
                 app.input_selection = None;
                 if text.starts_with(':') {
-                    if run_command(app, client, stream_handle, config, irc_tx, rt, &text)? {
+                    if run_command(app, clients, config, irc_tx, rt, &text)? {
                         return Ok(true);
                     }
-                } else if let Some(ref c) = client {
+                } else if let (Some(server), Some((ref c, _))) = (app.current_server.clone(), app.current_server.as_ref().and_then(|s| clients.get(s.as_str()))) {
                     let target = app.current_channel.as_deref().unwrap_or("*").to_string();
                     if target == "*server*" {
                         app.status_message = "Cannot send to server.".to_string();
                     } else if !text.is_empty() {
-                        send_typing_indicator(app, client, "done");
+                        send_typing_indicator(app, clients, "done");
                         let formatted = format::format_outgoing(&text);
-                        if app.secure_sessions.contains_key(&target) {
-                            let session = app.secure_sessions.get_mut(&target).unwrap();
+                        let sec_key = app::msg_key(&server, &target);
+                        if app.secure_sessions.contains_key(&sec_key) {
+                            let session = app.secure_sessions.get_mut(&sec_key).unwrap();
                             let mut ok = true;
                             for chunk in format::split_message_for_irc(&formatted, format::MAX_ENCRYPTED_PLAINTEXT_BYTES) {
                                 match session.encrypt(&chunk) {
@@ -1460,8 +1511,8 @@ fn handle_key_action(
                                     app.away_message = None;
                                     app.status_message = "Auto-unaway.".to_string();
                                 }
-                                if !app.acked_caps.contains("echo-message") {
-                                    push_self_message(app, &target, formatted, irc_tx, rt);
+                                if !app.acked_caps_per_server.get(&server).map(|s| s.contains("echo-message")).unwrap_or(false) {
+                                    push_self_message(app, &server, &target, formatted, irc_tx, rt);
                                 }
                             }
                         } else {
@@ -1473,8 +1524,8 @@ fn handle_key_action(
                                 app.away_message = None;
                                 app.status_message = "Auto-unaway.".to_string();
                             }
-                            if !app.acked_caps.contains("echo-message") {
-                                push_self_message(app, &target, formatted, irc_tx, rt);
+                            if !app.acked_caps_per_server.get(&server).map(|s| s.contains("echo-message")).unwrap_or(false) {
+                                push_self_message(app, &server, &target, formatted, irc_tx, rt);
                             }
                         }
                     }
@@ -1495,7 +1546,7 @@ fn handle_key_action(
                 app.input_cursor = 0;
                 app.input_selection = None;
                 app.mode = Mode::Normal;
-                if run_command(app, client, stream_handle, config, irc_tx, rt, &line)? {
+                if run_command(app, clients, config, irc_tx, rt, &line)? {
                     return Ok(true);
                 }
             }
@@ -1513,7 +1564,8 @@ fn handle_key_action(
             {
                 Some(b) => b,
                 None => {
-                    app.push_chat_log(&nick, "Secure handshake failed: invalid identity key.");
+                    let server = app.current_server.as_deref().unwrap_or("unknown").to_string();
+                    app.push_chat_log(&server, &nick, "Secure handshake failed: invalid identity key.");
                     app.status_message = "Secure handshake failed.".to_string();
                     return Ok(false);
                 }
@@ -1538,51 +1590,55 @@ fn handle_key_action(
                 their_identity_bytes,
             ) {
                 Ok(session) => {
-                    app.secure_sessions.insert(nick.clone(), session);
-                    if let Some(ref c) = client {
+                    app.secure_sessions.insert(app::msg_key(&server, &nick), session);
+                    if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                         let msg = format!("[:rvIRC:SECURE:ACK:{}:{}]", our_ephemeral_pub_b64, our_identity_pub_b64);
                         let _ = c.send_privmsg(&nick, &msg);
                     }
                     let fp = key_fingerprint(&identity_b64);
-                    app.push_chat_log(&nick, &format!("Key fingerprint: {}", fp));
-                    app.push_chat_log(&nick, "*** SECURE CONNECTION ESTABLISHED ***");
-                    app.push_chat_log(&nick, "Messages are now end-to-end encrypted (X25519 + ChaCha20-Poly1305).");
+                    app.push_chat_log(&server, &nick, &format!("Key fingerprint: {}", fp));
+                    app.push_chat_log(&server, &nick, "*** SECURE CONNECTION ESTABLISHED ***");
+                    app.push_chat_log(&server, &nick, "Messages are now end-to-end encrypted (X25519 + ChaCha20-Poly1305).");
                     if !app.known_keys.is_verified(&nick, &server) {
-                        app.push_chat_log(&nick, "Use :verify to compare verification codes.");
+                        app.push_chat_log(&server, &nick, "Use :verify to compare verification codes.");
                     }
                     app.status_message = format!("Secure session established with {}.", nick);
                 }
                 Err(e) => {
-                    app.push_chat_log(&nick, &format!("Secure handshake failed: {}", e));
+                    app.push_chat_log(&server, &nick, &format!("Secure handshake failed: {}", e));
                     app.status_message = format!("Secure handshake from {} failed: {}", nick, e);
                 }
             }
         }
         SecureReject => {
             let nick = app.secure_accept_nick.clone();
+            let server = app.current_server.as_deref().unwrap_or("unknown").to_string();
             app.secure_accept_popup_visible = false;
-            app.push_chat_log(&nick, "*** Secure session request rejected. ***");
+            app.push_chat_log(&server, &nick, "*** Secure session request rejected. ***");
             app.status_message = format!("Rejected secure session from {}.", nick);
         }
         FileReceiveAccept => {
             let code = app.file_receive_code.clone();
             let filename = app.file_receive_filename.clone();
             let nick = app.file_receive_nick.clone();
+            let server = app.current_server.as_deref().unwrap_or("unknown").to_string();
             app.file_receive_popup_visible = false;
 
-            app.push_chat_log(&nick, &format!("Accepted file: {}", filename));
+            app.push_chat_log(&server, &nick, &format!("Accepted file: {}", filename));
 
             if let Some(dl_dir) = config.resolved_download_dir() {
                 let safe_name = sanitize_received_filename(&filename);
                 let save_path = dl_dir.join(&safe_name);
                 let tx = irc_tx.clone();
                 let nick_c = nick.clone();
-                app.push_chat_log(&nick, &format!("Saving to {}...", save_path.display()));
+                let server_c = server.clone();
+                app.push_chat_log(&server, &nick, &format!("Saving to {}...", save_path.display()));
                 app.status_message = format!("Receiving {} from {}...", filename, nick);
                 rt.spawn(async move {
-                    match filetransfer::receive_file(&code, &save_path, &nick_c, &tx).await {
+                    match filetransfer::receive_file(&code, &save_path, &server_c, &nick_c, &tx).await {
                         Ok(()) => {
                             let _ = tx.send(IrcMessage::SendPrivmsg {
+                                server: server_c.clone(),
                                 target: nick_c.clone(),
                                 text: "[:rvIRC:WORMHOLE:COMPLETE]".to_string(),
                             });
@@ -1593,6 +1649,7 @@ fn handle_key_action(
                         }
                         Err(e) => {
                             let _ = tx.send(IrcMessage::ChatLog {
+                                server: server_c,
                                 target: nick_c,
                                 text: format!("File receive failed: {}", e),
                             });
@@ -1616,7 +1673,7 @@ fn handle_key_action(
         FileReceiveReject => {
             let nick = app.file_receive_nick.clone();
             app.file_receive_popup_visible = false;
-            if let Some(ref c) = client {
+            if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                 let _ = c.send_privmsg(&nick, "[:rvIRC:WORMHOLE:REJECT]");
             }
             app.status_message = format!("Rejected file from {}.", nick);
@@ -1637,17 +1694,20 @@ fn handle_key_action(
                 } else if app.file_browser_mode == app::FileBrowserMode::SendFile {
                     let file_path = app.file_browser_path.join(&name);
                     let nick = app.file_browser_pending_nick.clone();
+                    let server = app.current_server.clone().unwrap_or_else(|| "unknown".to_string());
                     app.file_browser_visible = false;
 
                     let tx = irc_tx.clone();
                     let nick_clone = nick.clone();
-                    app.push_chat_log(&nick, &format!("Starting file send: {}", name));
+                    let server_clone = server.clone();
+                    app.push_chat_log(&server, &nick, &format!("Starting file send: {}", name));
                     app.status_message = format!("Starting file send of {} to {}...", name, nick);
                     rt.spawn(async move {
-                        match filetransfer::send_file(&file_path, nick_clone.clone(), tx.clone()).await {
+                        match filetransfer::send_file(&file_path, server_clone.clone(), nick_clone.clone(), tx.clone()).await {
                             Ok(()) => {}
                             Err(e) => {
                                 let _ = tx.send(IrcMessage::ChatLog {
+                                    server: server_clone,
                                     target: nick_clone.clone(),
                                     text: format!("File send failed: {}", e),
                                 });
@@ -1672,18 +1732,21 @@ fn handle_key_action(
                 let filename = app.file_browser_pending_filename.clone();
                 let code = app.file_browser_pending_code.clone();
                 let nick = app.file_browser_pending_nick.clone();
+                let server = app.current_server.clone().unwrap_or_else(|| "unknown".to_string());
                 app.file_browser_visible = false;
 
                 let safe_name = sanitize_received_filename(&filename);
                 let save_path = save_dir.join(&safe_name);
                 let tx = irc_tx.clone();
                 let nick_c = nick.clone();
-                app.push_chat_log(&nick, &format!("Receiving {} to {}...", filename, save_path.display()));
+                let server_c = server.clone();
+                app.push_chat_log(&server, &nick, &format!("Receiving {} to {}...", filename, save_path.display()));
                 app.status_message = format!("Receiving {} from {}...", filename, nick);
                 rt.spawn(async move {
-                    match filetransfer::receive_file(&code, &save_path, &nick_c, &tx).await {
+                    match filetransfer::receive_file(&code, &save_path, &server_c, &nick_c, &tx).await {
                         Ok(()) => {
                             let _ = tx.send(IrcMessage::SendPrivmsg {
+                                server: server_c.clone(),
                                 target: nick_c.clone(),
                                 text: "[:rvIRC:WORMHOLE:COMPLETE]".to_string(),
                             });
@@ -1694,6 +1757,7 @@ fn handle_key_action(
                         }
                         Err(e) => {
                             let _ = tx.send(IrcMessage::ChatLog {
+                                server: server_c,
                                 target: nick_c,
                                 text: format!("File receive failed: {}", e),
                             });
@@ -1706,14 +1770,14 @@ fn handle_key_action(
         FileBrowserClose => {
             app.file_browser_visible = false;
             let nick = app.file_browser_pending_nick.clone();
-            if let Some(ref c) = client {
+            if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                 let _ = c.send_privmsg(&nick, "[:rvIRC:WORMHOLE:REJECT]");
             }
             app.status_message = "File transfer cancelled.".to_string();
         }
         Esc => {
             if app.mode == Mode::Insert {
-                send_typing_indicator(app, client, "done");
+                send_typing_indicator(app, clients, "done");
             }
             app.mode = Mode::Normal;
             app.input.clear();
@@ -1729,8 +1793,7 @@ fn handle_key_action(
 /// Returns Ok(true) if the program should exit (e.g. after :quit / :q).
 fn run_command(
     app: &mut App,
-    client: &mut Option<Client>,
-    stream_handle: &mut Option<tokio::task::JoinHandle<()>>,
+    clients: &mut HashMap<String, (Client, tokio::task::JoinHandle<()>)>,
     config: &RvConfig,
     irc_tx: &IrcMessageTx,
     rt: &tokio::runtime::Runtime,
@@ -1741,96 +1804,118 @@ fn run_command(
     use commands::CommandResult as R;
     match result {
         R::Join { channel: ch, key } => {
-            if let Some(ref c) = client {
-                if let Some(ref k) = key {
-                    c.send_join_with_keys(&ch, k).map_err(|e| e.to_string())?;
+            if let Some(server) = app.current_server.clone() {
+                if let Some((ref c, _)) = clients.get(server.as_str()) {
+                    if let Some(ref k) = key {
+                        c.send_join_with_keys(&ch, k).map_err(|e| e.to_string())?;
+                    } else {
+                        c.send_join(&ch).map_err(|e| e.to_string())?;
+                    }
+                    let _ = c.send_topic(&ch, "");
+                    let chans = app.channels_per_server.entry(server.to_string()).or_default();
+                    if !chans.contains(&ch) {
+                        chans.push(ch.clone());
+                    }
+                    app.save_current_read_marker();
+                    app.current_channel = Some(ch.clone());
+                    app.mark_target_read(&server, &ch);
+                    app.sync_channel_index_to_current();
+                    app.restore_read_marker_for(&server, &ch);
+                    app.status_message = format!("Joined {}", ch);
                 } else {
-                    c.send_join(&ch).map_err(|e| e.to_string())?;
+                    app.status_message = "Not connected.".to_string();
                 }
-                let _ = c.send_topic(&ch, "");
-                app.channel_list.push(ch.clone());
-                app.save_current_read_marker();
-                app.current_channel = Some(ch.clone());
-                app.mark_target_read(&ch);
-                app.sync_channel_index_to_current();
-                app.restore_read_marker_for(&ch);
-                app.status_message = format!("Joined {}", ch);
             } else {
                 app.status_message = "Not connected.".to_string();
             }
         }
         R::Part(Some(target)) => {
-            if target.starts_with('#') || target.starts_with('&') {
-                if let Some(ref c) = client {
-                    c.send_part(&target).map_err(|e| e.to_string())?;
-                    app.channel_list.retain(|x| x != &target);
-                }
-                app.clamp_channel_index();
-                app.save_current_read_marker();
-                app.current_channel = app.selected_target();
-                if let Some(t) = app.current_channel.clone() {
-                    app.restore_read_marker_for(&t);
-                }
-            } else {
-                // DM: close the message window
-                if app.dm_targets.contains(&target) {
-                    app.dm_targets.retain(|x| x != &target);
-                    app.clamp_messages_index();
-                    if app.current_channel.as_ref() == Some(&target) {
-                        app.save_current_read_marker();
-                        app.current_channel = app.messages_list().first().cloned()
-                            .or_else(|| app.channels_list().first().cloned());
-                        app.sync_channel_index_to_current();
-                        if let Some(t) = app.current_channel.clone() {
-                            app.restore_read_marker_for(&t);
-                        }
-                    }
-                    app.status_message = format!("Closed DM with {}", target);
-                } else {
-                    app.status_message = format!("No DM with {}.", target);
-                }
-            }
-            if let Some(t) = app.current_channel.clone() {
-                app.mark_target_read(&t);
-            }
-        }
-        R::Part(None) => {
-            if let Some(target) = app.current_channel.clone() {
+            if let Some(server) = app.current_server.as_ref() {
                 if target.starts_with('#') || target.starts_with('&') {
-                    if app.channel_list.iter().any(|c| c == &target) {
-                        if let Some(ref c) = client {
-                            c.send_part(&target).map_err(|e| e.to_string())?;
-                            app.channel_list.retain(|x| x != &target);
+                    if let Some((ref c, _)) = clients.get(server.as_str()) {
+                        c.send_part(&target).map_err(|e| e.to_string())?;
+                        if let Some(chans) = app.channels_per_server.get_mut(server) {
+                            chans.retain(|x| x != &target);
                         }
                     }
                     app.clamp_channel_index();
                     app.save_current_read_marker();
-                    app.current_channel = app.selected_target();
-                    if let Some(t) = app.current_channel.clone() {
-                        app.restore_read_marker_for(&t);
+                    if let Some((s, t)) = app.selected_channel_entry().or_else(|| app.selected_message_entry()) {
+                        app.current_server = Some(s.clone());
+                        app.current_channel = Some(t.clone());
+                        app.restore_read_marker_for(&s, &t);
                     }
                 } else {
                     // DM: close the message window
-                    if app.dm_targets.contains(&target) {
-                        app.dm_targets.retain(|x| x != &target);
-                        app.clamp_messages_index();
-                        app.save_current_read_marker();
-                        app.current_channel = app.messages_list().first().cloned()
-                            .or_else(|| app.channels_list().first().cloned());
-                        app.sync_channel_index_to_current();
-                        if let Some(t) = app.current_channel.clone() {
-                            app.restore_read_marker_for(&t);
+                    if let Some(dms) = app.dm_targets_per_server.get_mut(server) {
+                        if dms.contains(&target) {
+                            dms.retain(|x| x != &target);
+                            app.clamp_messages_index();
+                            if app.current_channel.as_ref() == Some(&target) {
+                                app.save_current_read_marker();
+                                if let Some((s, t)) = app.messages_list().first().cloned()
+                                    .or_else(|| app.channels_list().first().cloned()) {
+                                    app.current_server = Some(s.clone());
+                                    app.current_channel = Some(t.clone());
+                                    app.sync_channel_index_to_current();
+                                    app.restore_read_marker_for(&s, &t);
+                                }
+                            }
+                            app.status_message = format!("Closed DM with {}", target);
+                        } else {
+                            app.status_message = format!("No DM with {}.", target);
                         }
-                        app.status_message = format!("Closed DM with {}", target);
                     }
                 }
-                if let Some(t) = app.current_channel.clone() {
-                    app.mark_target_read(&t);
+            }
+            if let (Some(s), Some(t)) = (app.current_server.clone(), app.current_channel.clone()) {
+                app.mark_target_read(&s, &t);
+            }
+        }
+        R::Part(None) => {
+            if let (Some(server), Some(target)) = (app.current_server.as_ref(), app.current_channel.clone()) {
+                if target.starts_with('#') || target.starts_with('&') {
+                    if app.channels_per_server.get(server).map_or(false, |chans| chans.contains(&target)) {
+                        if let Some((ref c, _)) = clients.get(server.as_str()) {
+                            c.send_part(&target).map_err(|e| e.to_string())?;
+                        }
+                        if let Some(chans) = app.channels_per_server.get_mut(server) {
+                            chans.retain(|x| x != &target);
+                        }
+                    }
+                    app.clamp_channel_index();
+                    app.save_current_read_marker();
+                    if let Some((s, t)) = app.selected_channel_entry().or_else(|| app.selected_message_entry()) {
+                        app.current_server = Some(s.clone());
+                        app.current_channel = Some(t.clone());
+                        app.restore_read_marker_for(&s, &t);
+                    }
+                } else {
+                    if let Some(dms) = app.dm_targets_per_server.get_mut(server) {
+                        if dms.contains(&target) {
+                            dms.retain(|x| x != &target);
+                            app.clamp_messages_index();
+                            app.save_current_read_marker();
+                            if let Some((s, t)) = app.messages_list().first().cloned()
+                                .or_else(|| app.channels_list().first().cloned()) {
+                                app.current_server = Some(s.clone());
+                                app.current_channel = Some(t.clone());
+                            }
+                            app.sync_channel_index_to_current();
+                            if let (Some(s), Some(t)) = (app.current_server.clone(), app.current_channel.clone()) {
+                                app.restore_read_marker_for(&s, &t);
+                            }
+                            app.status_message = format!("Closed DM with {}", target);
+                        }
+                    }
+                }
+                if let (Some(s), Some(t)) = (app.current_server.clone(), app.current_channel.clone()) {
+                    app.mark_target_read(&s, &t);
                 }
             }
         }
         R::List => {
-            if let Some(ref c) = client {
+            if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                 let _ = c.send(IrcCommand::LIST(None, None));
                 app.channel_list_popup_visible = true;
                 app.server_channel_list = Vec::new();
@@ -1851,33 +1936,30 @@ fn run_command(
         R::Reconnect => {
             if let Some(server_name) = app.current_server.clone() {
                 if let Some(server) = config.server_by_name(&server_name) {
-                    if let Some(h) = stream_handle.take() {
+                    if let Some((c, h)) = clients.remove(&server_name) {
+                        let _ = c.send_quit("Reconnecting");
                         h.abort();
+                        std::thread::sleep(std::time::Duration::from_millis(250));
                     }
-                    drop(client.take());
                     match connect(server, config, irc_tx.clone(), rt) {
                         Ok((c, stream)) => {
                             let tx = irc_tx.clone();
                             let our_nick = config.nickname.clone();
-                            let handle = rt.spawn(async move { run_stream(stream, tx, our_nick).await });
-                            *stream_handle = Some(handle);
-                            *client = Some(c);
+                            let name_for_spawn = server_name.clone();
+                            let handle = rt.spawn(async move { run_stream(stream, tx, name_for_spawn, our_nick).await });
+                            clients.insert(server_name.clone(), (c, handle));
                             app.current_nickname = config.nickname.clone();
                             app.current_channel = Some("*server*".to_string());
-                            app.mark_target_read("*server*");
+                            app.mark_target_read(&server_name, "*server*");
                             app.channel_index = 0;
                             if server.sasl_mechanism.is_none() {
                                 if let Some(ref pw) = server.identify_password {
-                                    if let Some(ref c) = client {
+                                    if let Some((ref c, _)) = clients.get(server_name.as_str()) {
                                         let _ = c.send_privmsg("NickServ", &format!("IDENTIFY {}", pw));
                                         app.status_message = "Identifying with NickServ...".to_string();
                                     }
-                                    app.auto_join_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
-                                } else {
-                                    app.auto_join_after = None;
+                                    app.auto_join_after_per_server.insert(server_name.clone(), std::time::Instant::now() + std::time::Duration::from_secs(2));
                                 }
-                            } else {
-                                app.auto_join_after = None;
                             }
                             app.status_message = format!("Reconnected to {}.", &server_name);
                         }
@@ -1896,111 +1978,121 @@ fn run_command(
                     app.status_message = format!("Unknown server: {}", name);
                 }
                 Some(server) => {
-                    app.clear_reconnect();
-                    if let Some(h) = stream_handle.take() {
-                        h.abort();
-                    }
-                    drop(client.take());
-                    match connect(server, config, irc_tx.clone(), rt) {
-                        Ok((c, stream)) => {
-                            let tx = irc_tx.clone();
-                            let our_nick = config.nickname.clone();
-                            let handle = rt.spawn(async move {
-                                run_stream(stream, tx, our_nick).await;
-                            });
-                            *stream_handle = Some(handle);
-                            *client = Some(c);
-                            app.current_nickname = config.nickname.clone();
-                            app.current_channel = Some("*server*".to_string());
-                            app.mark_target_read("*server*");
-                            app.channel_index = 0;
-                            if server.sasl_mechanism.is_none() {
-                                if let Some(ref pw) = server.identify_password {
-                                    if let Some(ref c) = client {
-                                        let _ = c.send_privmsg("NickServ", &format!("IDENTIFY {}", pw));
-                                        app.status_message = "Identifying with NickServ...".to_string();
-                                    }
-                                    app.auto_join_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
-                                } else {
-                                    app.auto_join_after = None;
+                    if clients.contains_key(&name) {
+                        app.status_message = format!("Already connected to {}.", name);
+                    } else {
+                        app.clear_reconnect();
+                        match connect(server, config, irc_tx.clone(), rt) {
+                            Ok((c, stream)) => {
+                                let tx = irc_tx.clone();
+                                let our_nick = config.nickname.clone();
+                                let name_for_spawn = name.clone();
+                                let handle = rt.spawn(async move {
+                                    run_stream(stream, tx, name_for_spawn, our_nick).await;
+                                });
+                                clients.insert(name.clone(), (c, handle));
+                                if app.current_server.is_none() {
+                                    app.current_server = Some(name.clone());
+                                    app.current_channel = Some("*server*".to_string());
+                                    app.mark_target_read(&name, "*server*");
+                                    app.channel_index = 0;
                                 }
-                            } else {
-                                app.auto_join_after = None;
+                                app.current_nickname = config.nickname.clone();
+                                if server.sasl_mechanism.is_none() {
+                                    if let Some(ref pw) = server.identify_password {
+                                        if let Some((ref c, _)) = clients.get(name.as_str()) {
+                                            let _ = c.send_privmsg("NickServ", &format!("IDENTIFY {}", pw));
+                                            app.status_message = "Identifying with NickServ...".to_string();
+                                        }
+                                        app.auto_join_after_per_server.insert(name.clone(), std::time::Instant::now() + std::time::Duration::from_secs(2));
+                                    }
+                                }
+                                app.status_message = format!("Connected to {}.", name);
                             }
-                        }
-                        Err(e) => {
-                            app.status_message = e;
+                            Err(e) => {
+                                app.status_message = e;
+                            }
                         }
                     }
                 }
             }
         }
-        R::Disconnect => {
-            app.clear_reconnect();
-            if let Some(ref c) = client {
-                let _ = c.send_quit("Leaving");
-                std::thread::sleep(std::time::Duration::from_millis(250));
+        R::Disconnect(server_arg) => {
+            let server = server_arg.or_else(|| app.current_server.clone());
+            if let Some(server) = server {
+                app.clear_reconnect();
+                if let Some((c, h)) = clients.remove(&server) {
+                    let _ = c.send_quit("Leaving");
+                    h.abort();
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+                app.connected_servers.retain(|s| s != &server);
+                app.channels_per_server.remove(&server);
+                app.dm_targets_per_server.remove(&server);
+                app.typing_status.retain(|(s, _, _), _| s != &server);
+                app.last_typing_sent.retain(|k, _| !k.starts_with(&format!("{}/", server)));
+                for k in app.messages.keys().cloned().collect::<Vec<_>>() {
+                    if k.starts_with(&format!("{}/", server)) {
+                        app.messages.remove(&k);
+                    }
+                }
+                app.unread_targets.retain(|k| !k.starts_with(&format!("{}/", server)));
+                app.unread_mentions.retain(|k| !k.starts_with(&format!("{}/", server)));
+                app.current_server = app.connected_servers.first().cloned();
+                app.current_channel = app.current_server.as_ref().map(|_| "*server*".to_string());
+                app.sync_channel_index_to_current();
+                app.clamp_channel_index();
+                app.clamp_messages_index();
+                app.user_list.clear();
+                app.search_popup_visible = false;
+                app.channel_list_popup_visible = false;
+                app.server_channel_list.clear();
+                app.channel_list_filter.clear();
+                app.channel_list_scroll_mode = false;
+                app.server_list_popup_visible = false;
+                app.highlight_popup_visible = false;
+                app.whois_popup_visible = false;
+                app.whois_nick.clear();
+                app.whois_lines.clear();
+                app.pending_auto_join_servers.remove(&server);
+                app.auto_join_after_per_server.remove(&server);
+                app.friends_online.clear();
+                app.friends_away.clear();
+                app.away_message = None;
+                app.status_message = "Disconnected. Type :connect <server> to reconnect.".to_string();
+            } else {
+                app.status_message = "Not connected.".to_string();
             }
-            if let Some(h) = stream_handle.take() {
+        }
+        R::Quit(_) => {
+            app.clear_reconnect();
+            for (_, (c, h)) in std::mem::take(clients) {
+                let _ = c.send_quit("Leaving");
                 h.abort();
             }
-            drop(client.take());
+            std::thread::sleep(std::time::Duration::from_millis(250));
             app.current_server = None;
             app.current_channel = None;
-            app.current_nickname = None;
+            app.connected_servers.clear();
+            app.pending_auto_join_servers.clear();
+            app.auto_join_after_per_server.clear();
+            app.channels_per_server.clear();
+            app.dm_targets_per_server.clear();
             app.unread_targets.clear();
             app.unread_mentions.clear();
             app.typing_status.clear();
             app.last_typing_sent.clear();
-            app.channel_list.clear();
-            app.dm_targets.clear();
-            app.clamp_messages_index();
-            app.user_list.clear();
-            app.search_popup_visible = false;
-            app.channel_list_popup_visible = false;
-            app.server_channel_list.clear();
-            app.channel_list_filter.clear();
-            app.channel_list_scroll_mode = false;
-            app.server_list_popup_visible = false;
-            app.highlight_popup_visible = false;
-            app.whois_popup_visible = false;
-            app.whois_nick.clear();
-            app.whois_lines.clear();
-            app.pending_auto_join = false;
-            app.auto_join_after = None;
-            app.channel_topics.clear();
-            app.channel_modes.clear();
-            app.last_invite = None;
-            app.friends_online.clear();
-            app.friends_away.clear();
-            app.away_message = None;
-            app.status_message = "Disconnected. Type :connect <server> to reconnect.".to_string();
-        }
-        R::Quit(_) => {
-            app.clear_reconnect();
-            if let Some(ref c) = client {
-                let _ = c.send_quit("Leaving");
-                std::thread::sleep(std::time::Duration::from_millis(250));
-            }
-            if let Some(h) = stream_handle.take() {
-                h.abort();
-            }
-            drop(client.take());
-            app.current_server = None;
-            app.current_channel = None;
-            app.unread_targets.clear();
-            app.unread_mentions.clear();
-            app.channel_list.clear();
             app.user_list.clear();
             app.status_message = "Disconnected.".to_string();
             return Ok(true);
         }
         R::Msg { nick, text } => {
-            if let Some(ref c) = client {
+            if let (Some(server), Some((ref c, _))) = (app.current_server.clone(), app.current_server.as_ref().and_then(|s| clients.get(s.as_str()))) {
                 if !text.is_empty() {
                     let formatted = format::format_outgoing(&text);
-                    if app.secure_sessions.contains_key(&nick) {
-                        let session = app.secure_sessions.get_mut(&nick).unwrap();
+                    let sec_key = app::msg_key(&server, &nick);
+                    if app.secure_sessions.contains_key(&sec_key) {
+                        let session = app.secure_sessions.get_mut(&sec_key).unwrap();
                         let mut ok = true;
                         for chunk in format::split_message_for_irc(&formatted, format::MAX_ENCRYPTED_PLAINTEXT_BYTES) {
                             match session.encrypt(&chunk) {
@@ -2016,28 +2108,29 @@ fn run_command(
                             }
                         }
                         if ok {
-                            push_self_message(app, &nick, formatted, irc_tx, rt);
+                            push_self_message(app, &server, &nick, formatted, irc_tx, rt);
                         }
                     } else {
                         for chunk in format::split_message_for_irc(&formatted, format::MAX_MESSAGE_BYTES) {
                             c.send_privmsg(&nick, &chunk).map_err(|e| e.to_string())?;
                         }
-                        push_self_message(app, &nick, formatted, irc_tx, rt);
+                        push_self_message(app, &server, &nick, formatted, irc_tx, rt);
                     }
                 }
-                if !app.dm_targets.contains(&nick) {
-                    app.dm_targets.push(nick.clone());
+                let dms = app.dm_targets_per_server.entry(server.clone()).or_default();
+                if !dms.contains(&nick) {
+                    dms.push(nick.clone());
                 }
                 app.save_current_read_marker();
                 app.current_channel = Some(nick.clone());
-                app.mark_target_read(&nick);
+                app.mark_target_read(&server, &nick);
                 app.sync_channel_index_to_current();
-                app.restore_read_marker_for(&nick);
+                app.restore_read_marker_for(&server, &nick);
                 app.status_message = format!("Message sent to {}", nick);
             }
         }
         R::Me(text) => {
-            if let (Some(ref c), Some(ref target)) = (client.as_ref(), app.current_channel.as_ref()) {
+            if let (Some((ref c, _)), Some(ref target)) = (app.current_server.as_ref().and_then(|s| clients.get(s)), app.current_channel.as_ref()) {
                 if target.as_str() == "*server*" {
                     app.status_message = "Cannot /me to server.".to_string();
                 } else if !text.is_empty() {
@@ -2048,7 +2141,7 @@ fn run_command(
             }
         }
         R::Nick(newnick) => {
-            if let Some(ref c) = client {
+            if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                 let _ = c.send(IrcCommand::NICK(newnick.clone()));
                 app.current_nickname = Some(newnick.clone());
                 app.status_message = format!("Changing nick to {}", newnick);
@@ -2057,10 +2150,10 @@ fn run_command(
             }
         }
         R::Topic(Some(topic)) => {
-            if let (Some(ref c), Some(ref ch)) = (client.as_ref(), app.current_channel.as_ref()) {
+            if let (Some(server), Some((ref c, _)), Some(ref ch)) = (app.current_server.as_ref(), app.current_server.as_ref().and_then(|s| clients.get(s)), app.current_channel.as_ref()) {
                 if ch.starts_with('#') || ch.starts_with('&') {
                     c.send_topic(ch, &topic).map_err(|e| e.to_string())?;
-                    app.channel_topics.insert(ch.to_string(), topic.clone());
+                    app.channel_topics.insert(app::msg_key(server, ch), topic.clone());
                     app.status_message = "Topic set.".to_string();
                 } else {
                     app.status_message = "Not a channel.".to_string();
@@ -2070,12 +2163,12 @@ fn run_command(
             }
         }
         R::Topic(None) => {
-            if let Some(ref ch) = app.current_channel.as_ref() {
+            if let (Some(ref server), Some(ref ch)) = (app.current_server.as_ref(), app.current_channel.as_ref()) {
                 if ch.starts_with('#') || ch.starts_with('&') {
-                    if let Some(ref c) = client {
+                    if let Some((ref c, _)) = clients.get(server.as_str()) {
                         let _ = c.send_topic(ch, "");
                     }
-                    if let Some(t) = app.channel_topics.get(ch.as_str()) {
+                    if let Some(t) = app.channel_topics.get(&app::msg_key(server, ch)) {
                         app.status_message = if t.is_empty() { "No topic set.".to_string() } else { t.clone() };
                     } else {
                         app.status_message = "Requesting topic...".to_string();
@@ -2085,7 +2178,7 @@ fn run_command(
         }
         R::Kick { channel, nick, reason } => {
             let ch = channel.or_else(|| app.current_channel.clone()).filter(|c| c.starts_with('#') || c.starts_with('&'));
-            if let (Some(ref c), Some(ch)) = (client.as_ref(), ch) {
+            if let (Some((ref c, _)), Some(ch)) = (app.current_server.as_ref().and_then(|s| clients.get(s)), ch) {
                 c.send_kick(&ch, &nick, reason.as_deref().unwrap_or("")).map_err(|e| e.to_string())?;
                 app.status_message = format!("Kicked {} from {}", nick, ch);
             } else {
@@ -2094,7 +2187,7 @@ fn run_command(
         }
         R::Ban { channel, mask } => {
             let ch = channel.or_else(|| app.current_channel.clone()).filter(|c| c.starts_with('#') || c.starts_with('&'));
-            if let (Some(ref c), Some(ch)) = (client.as_ref(), ch) {
+            if let (Some((ref c, _)), Some(ch)) = (app.current_server.as_ref().and_then(|s| clients.get(s)), ch) {
                 if mask.is_empty() {
                     app.status_message = "Usage: :ban [channel] <mask>".to_string();
                 } else {
@@ -2107,7 +2200,7 @@ fn run_command(
         }
         R::Unban { channel, mask } => {
             let ch = channel.or_else(|| app.current_channel.clone()).filter(|c| c.starts_with('#') || c.starts_with('&'));
-            if let (Some(ref c), Some(ch)) = (client.as_ref(), ch) {
+            if let (Some((ref c, _)), Some(ch)) = (app.current_server.as_ref().and_then(|s| clients.get(s)), ch) {
                 if mask.is_empty() {
                     app.status_message = "Usage: :unban [channel] <mask>".to_string();
                 } else {
@@ -2120,7 +2213,7 @@ fn run_command(
         }
         R::Invite { nick, channel } => {
             let ch = channel.or_else(|| app.current_channel.clone()).filter(|c| c.starts_with('#') || c.starts_with('&'));
-            if let (Some(ref c), Some(ch)) = (client.as_ref(), ch) {
+            if let (Some((ref c, _)), Some(ch)) = (app.current_server.as_ref().and_then(|s| clients.get(s)), ch) {
                 c.send_invite(&nick, &ch).map_err(|e| e.to_string())?;
                 app.status_message = format!("Invited {} to {}", nick, ch);
             } else {
@@ -2128,7 +2221,7 @@ fn run_command(
             }
         }
         R::Away(msg) => {
-            if let Some(ref c) = client {
+            if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                 let _ = c.send(IrcCommand::AWAY(msg.clone()));
                 app.away_message = msg;
                 app.status_message = match &app.away_message {
@@ -2142,9 +2235,11 @@ fn run_command(
         R::SwitchChannel(ch) => {
             app.save_current_read_marker();
             app.current_channel = Some(ch.clone());
-            app.mark_target_read(&ch);
-            app.sync_channel_index_to_current();
-            app.restore_read_marker_for(&ch);
+            if let Some(server) = app.current_server.clone() {
+                app.mark_target_read(&server, &ch);
+                app.sync_channel_index_to_current();
+                app.restore_read_marker_for(&server, &ch);
+            }
         }
         R::Highlight => {
             app.highlight_popup_visible = true;
@@ -2160,7 +2255,7 @@ fn run_command(
             app.status_message = "Search (type to filter, Enter to browse, Esc to close)".to_string();
         }
         R::Clear => {
-            let key = app.current_channel.as_deref().unwrap_or("*server*").to_string();
+            let key = app.current_server.as_ref().map_or_else(|| "*server*".to_string(), |s| app::msg_key(s, app.current_channel.as_deref().unwrap_or("*server*")));
             let image_ids: Vec<usize> = app.messages
                 .get(&key)
                 .map(|v| v.iter().filter_map(|m| m.image_id).collect())
@@ -2226,7 +2321,7 @@ fn run_command(
                 app.friends_list.push(nick.clone());
                 app.friends_list.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
                 app.clamp_friends_index();
-                if let Some(ref c) = client {
+                if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                     let _ = c.send(IrcCommand::MONITOR("+".to_string(), Some(nick.clone())));
                 }
                 if let Some(ref path) = app.friends_path {
@@ -2240,7 +2335,7 @@ fn run_command(
             if let Some(pos) = app.friends_list.iter().position(|n| n.eq_ignore_ascii_case(nick)) {
                 app.friends_list.remove(pos);
                 app.clamp_friends_index();
-                if let Some(ref c) = client {
+                if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                     let _ = c.send(IrcCommand::MONITOR("-".to_string(), Some(nick.to_string())));
                 }
                 app.friends_online.remove(nick);
@@ -2256,7 +2351,7 @@ fn run_command(
         R::Ignore(nick) => {
             let nick = nick.trim();
             if !nick.is_empty() {
-                if let Some(ref c) = client {
+                if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                     use irc::proto::Command as Ic;
                     match c.send(Ic::Raw("SILENCE".to_string(), vec![format!("+{}", nick)])) {
                         Ok(()) => app.status_message = format!("Ignored {} (server-side).", nick),
@@ -2270,7 +2365,7 @@ fn run_command(
         R::Unignore(nick) => {
             let nick = nick.trim();
             if !nick.is_empty() {
-                if let Some(ref c) = client {
+                if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                     use irc::proto::Command as Ic;
                     match c.send(Ic::Raw("SILENCE".to_string(), vec![format!("-{}", nick)])) {
                         Ok(()) => app.status_message = format!("Unignored {}.", nick),
@@ -2301,9 +2396,12 @@ fn run_command(
             let n = app.typing_status.len();
             let preview: Vec<String> = app.typing_status.iter()
                 .take(3)
-                .map(|((nick, t), (status, _))| format!("{}->{}:{}", nick, t, status))
+                .map(|((_s, nick, t), (status, _))| format!("{}->{}:{}", nick, t, status))
                 .collect();
-            let mt = app.acked_caps.contains("message-tags");
+            let mt = app.current_server.as_ref()
+                .and_then(|srv| app.acked_caps_per_server.get(srv))
+                .map(|s| s.contains("message-tags"))
+                .unwrap_or(false);
             let mt_str = if n > 0 && !mt { "ok (inferred)" } else { if mt { "ok" } else { "false" } };
             app.status_message = format!(
                 "Typing: {} entries {:?} | message-tags={}",
@@ -2320,26 +2418,31 @@ fn run_command(
             app.license_popup_visible = true;
         }
         R::Caps => {
-            if app.requested_caps.is_empty() {
-                app.status_message = "Not connected or no capabilities negotiated yet.".to_string();
-            } else {
-                let lines: Vec<(String, bool)> = app.requested_caps.iter()
-                    .map(|c| (c.clone(), app.acked_caps.contains(c)))
-                    .collect();
-                for (c, ok) in lines {
-                    app.push_message(
-                        "*server*",
-                        MessageLine {
-                            source: "***".to_string(),
-                            text: format!("{} = {}", c, ok),
-                            kind: MessageKind::Other,
-                            image_id: None,
-                            timestamp: None,
-                            account: None,
-                        },
-                    );
+            if let Some(server) = app.current_server.clone() {
+                let requested = app.requested_caps_per_server.get(&server).map(|s| s.iter().cloned().collect::<Vec<_>>()).unwrap_or_default();
+                let acked_set = app.acked_caps_per_server.get(&server).cloned().unwrap_or_default();
+                if requested.is_empty() {
+                    app.status_message = "No capabilities negotiated yet.".to_string();
+                } else {
+                    for c in &requested {
+                        let ok = acked_set.contains(c);
+                        app.push_message(
+                            &server,
+                            "*server*",
+                            MessageLine {
+                                source: "***".to_string(),
+                                text: format!("{} = {}", c, ok),
+                                kind: MessageKind::Other,
+                                image_id: None,
+                                timestamp: None,
+                                account: None,
+                            },
+                        );
+                    }
+                    app.status_message = format!("{} capability(ies)", requested.len());
                 }
-                app.status_message = format!("{} capability(ies)", app.requested_caps.len());
+            } else {
+                app.status_message = "Not connected.".to_string();
             }
         }
         R::Whois(nick) => {
@@ -2356,7 +2459,7 @@ fn run_command(
             };
             match target {
                 Some(n) if !n.is_empty() => {
-                    if let Some(ref c) = client {
+                    if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                         let _ = c.send(IrcCommand::WHOIS(None, n.clone()));
                         app.whois_popup_visible = true;
                         app.whois_nick = n;
@@ -2373,11 +2476,11 @@ fn run_command(
         R::FocusUsers => {
             if app.user_panel_visible {
                 app.panel_focus = PanelFocus::Users;
-                request_channel_names(client, app);
+                request_channel_names(clients, app);
             }
         }
         R::SendPrivmsg { target, text } => {
-            if let Some(ref c) = client {
+            if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                 for chunk in format::split_message_for_irc(&text, format::MAX_MESSAGE_BYTES) {
                     c.send_privmsg(&target, &chunk).map_err(|e| e.to_string())?;
                 }
@@ -2393,7 +2496,7 @@ fn run_command(
             };
             if nick.is_empty() {
                 app.status_message = "Usage: :secure <nick> (or use in a DM)".to_string();
-            } else if let Some(ref c) = client {
+            } else if let (Some(server), Some((ref c, _))) = (app.current_server.clone(), app.current_server.as_ref().and_then(|s| clients.get(s.as_str()))) {
                 let ephemeral = crypto::Keypair::generate();
                 let ephemeral_pub_b64 = ephemeral.public_key_b64();
                 let identity_pub_b64 = app.keypair.public_key_b64();
@@ -2401,11 +2504,12 @@ fn run_command(
                 c.send_privmsg(&nick, &msg).map_err(|e| e.to_string())?;
                 app.pending_secure.insert(nick.clone());
                 app.pending_secure_ephemeral.insert(nick.clone(), ephemeral);
-                if !app.dm_targets.contains(&nick) {
-                    app.dm_targets.push(nick.clone());
+                let dms = app.dm_targets_per_server.entry(server.to_string()).or_default();
+                if !dms.contains(&nick) {
+                    dms.push(nick.clone());
                 }
-                app.push_chat_log(&nick, &format!("*** ESTABLISHING SECURE CONNECTION WITH {} ***", nick));
-                app.push_chat_log(&nick, "Sending key exchange request...");
+                app.push_chat_log(&server, &nick, &format!("*** ESTABLISHING SECURE CONNECTION WITH {} ***", nick));
+                app.push_chat_log(&server, &nick, "Sending key exchange request...");
                 app.status_message = format!("Initiating secure session with {}...", nick);
             } else {
                 app.status_message = "Not connected.".to_string();
@@ -2419,11 +2523,16 @@ fn run_command(
             };
             if nick.is_empty() {
                 app.status_message = "Usage: :unsecure <nick> (or use in a DM)".to_string();
-            } else if app.secure_sessions.remove(&nick).is_some() {
-                app.push_chat_log(&nick, "*** SECURE SESSION ENDED ***");
-                app.status_message = format!("Secure session with {} ended.", nick);
+            } else if let Some(server) = app.current_server.clone() {
+                let sec_key = app::msg_key(&server, &nick);
+                if app.secure_sessions.remove(&sec_key).is_some() {
+                    app.push_chat_log(&server, &nick, "*** SECURE SESSION ENDED ***");
+                    app.status_message = format!("Secure session with {} ended.", nick);
+                } else {
+                    app.status_message = format!("No secure session with {}.", nick);
+                }
             } else {
-                app.status_message = format!("No secure session with {}.", nick);
+                app.status_message = "Not connected.".to_string();
             }
         }
         R::SendFile { nick: nick_arg, path } => {
@@ -2434,7 +2543,7 @@ fn run_command(
             };
             if nick.is_empty() {
                 app.status_message = "Usage: :sendfile <nick> <path> (or use in a DM)".to_string();
-            } else if client.is_none() {
+            } else if app.current_server.as_ref().and_then(|s| clients.get(s)).is_none() {
                 app.status_message = "Not connected.".to_string();
             } else if path.is_empty() {
                 app.file_browser_visible = true;
@@ -2451,20 +2560,22 @@ fn run_command(
                 let file_path = PathBuf::from(&path);
                 if !file_path.exists() {
                     app.status_message = format!("File not found: {}", path);
-                } else {
-                    let tx = irc_tx.clone();
+                } else if let Some(server) = app.current_server.clone() {
+                        let tx = irc_tx.clone();
                     let nick_clone = nick.clone();
+                    let server_clone = server.clone();
                     let file_name = file_path
                         .file_name()
                         .map(|n| n.to_string_lossy().to_string())
                         .unwrap_or_else(|| path.clone());
-                    app.push_chat_log(&nick, &format!("Starting file send: {}", file_name));
+                        app.push_chat_log(&server, &nick, &format!("Starting file send: {}", file_name));
                     app.status_message = format!("Starting file send of {} to {}...", file_name, nick);
                     rt.spawn(async move {
-                        match filetransfer::send_file(&file_path, nick_clone.clone(), tx.clone()).await {
+                        match filetransfer::send_file(&file_path, server_clone.clone(), nick_clone.clone(), tx.clone()).await {
                             Ok(()) => {}
                             Err(e) => {
                                 let _ = tx.send(IrcMessage::ChatLog {
+                                    server: server_clone,
                                     target: nick_clone.clone(),
                                     text: format!("File send failed: {}", e),
                                 });
@@ -2474,6 +2585,8 @@ fn run_command(
                             }
                         }
                     });
+                } else {
+                    app.status_message = "Not connected.".to_string();
                 }
             }
         }
@@ -2485,15 +2598,20 @@ fn run_command(
             };
             if nick.is_empty() {
                 app.status_message = "Usage: :verify <nick> (or use in a DM)".to_string();
-            } else if let Some(session) = app.secure_sessions.get(&nick) {
-                let words = session.sas_words();
-                let code = words.join(" ");
-                app.push_chat_log(&nick, &format!("*** Verification code with {}: {} ***", nick, code));
-                app.push_chat_log(&nick, "Both sides must run :verify -- ask your peer to run it too.");
-                app.push_chat_log(&nick, "Compare the 6 words out-of-band (voice, in person, etc). If they match, run :verified");
-                app.status_message = format!("SAS: {}", code);
+            } else if let Some(server) = app.current_server.clone() {
+                let sec_key = app::msg_key(&server, &nick);
+                if let Some(session) = app.secure_sessions.get(&sec_key) {
+                    let words = session.sas_words();
+                    let code = words.join(" ");
+                    app.push_chat_log(&server, &nick, &format!("*** Verification code with {}: {} ***", nick, code));
+                    app.push_chat_log(&server, &nick, "Both sides must run :verify -- ask your peer to run it too.");
+                    app.push_chat_log(&server, &nick, "Compare the 6 words out-of-band (voice, in person, etc). If they match, run :verified");
+                    app.status_message = format!("SAS: {}", code);
+                } else {
+                    app.status_message = format!("No secure session with {}.", nick);
+                }
             } else {
-                app.status_message = format!("No secure session with {}.", nick);
+                app.status_message = "Not connected.".to_string();
             }
         }
         R::Verified(nick_arg) => {
@@ -2504,17 +2622,18 @@ fn run_command(
             };
             if nick.is_empty() {
                 app.status_message = "Usage: :verified <nick> (or use in a DM)".to_string();
-            } else {
-                let server = app.current_server.as_deref().unwrap_or("unknown");
-                if app.known_keys.set_verified(&nick, server) {
+            } else if let Some(server) = app.current_server.clone() {
+                if app.known_keys.set_verified(&nick, &server) {
                     if let Some(ref path) = app.known_keys_path {
                         let _ = app.known_keys.save(path);
                     }
-                    app.push_chat_log(&nick, &format!("*** {} is now marked as VERIFIED ***", nick));
+                    app.push_chat_log(&server, &nick, &format!("*** {} is now marked as VERIFIED ***", nick));
                     app.status_message = format!("{} marked as verified.", nick);
                 } else {
                     app.status_message = format!("No known key for {}.", nick);
                 }
+            } else {
+                app.status_message = "Not connected.".to_string();
             }
         }
         R::UserAction { .. } => {}
@@ -2573,10 +2692,12 @@ fn common_prefix(mut it: impl Iterator<Item = impl AsRef<str>>) -> String {
 }
 
 /// Request NAMES for the current channel so the user list is populated.
-fn request_channel_names(client: &mut Option<Client>, app: &App) {
-    if let (Some(ref c), Some(ref ch)) = (client.as_ref(), app.current_channel.as_ref()) {
+fn request_channel_names(clients: &mut HashMap<String, (Client, tokio::task::JoinHandle<()>)>, app: &App) {
+    if let (Some(ref server), Some(ref ch)) = (app.current_server.as_ref(), app.current_channel.as_ref()) {
         if ch.starts_with('#') || ch.starts_with('&') {
-            let _ = c.send(IrcCommand::NAMES(Some(ch.to_string()), None));
+            if let Some((ref c, _)) = clients.get(server.as_str()) {
+                let _ = c.send(IrcCommand::NAMES(Some(ch.to_string()), None));
+            }
         }
     }
 }
@@ -2601,6 +2722,7 @@ const MAX_GIF_FRAMES: usize = 100;
 /// contains an image URL. Sender sees their own images inline.
 fn push_self_message(
     app: &mut App,
+    server: &str,
     target: &str,
     text: String,
     irc_tx: &IrcMessageTx,
@@ -2615,7 +2737,7 @@ fn push_self_message(
             spawn_image_download(url, line.image_id.unwrap(), irc_tx, rt);
         }
     }
-    app.push_message(target, line);
+    app.push_message(server, target, line);
 }
 
 /// Spawn a background task to download an image URL, decode it, and send the
@@ -2824,10 +2946,10 @@ fn parse_rvirc_protocol(from_nick: &str, text: &str) -> Option<app::ProtocolEven
     None
 }
 
-/// Process queued protocol events (called from main loop, has access to client).
+/// Process queued protocol events (called from main loop, has access to clients).
 fn process_protocol_events(
     app: &mut App,
-    client: &mut Option<Client>,
+    clients: &HashMap<String, (Client, tokio::task::JoinHandle<()>)>,
     rt: &tokio::runtime::Runtime,
     irc_tx: &IrcMessageTx,
 ) {
@@ -2836,31 +2958,32 @@ fn process_protocol_events(
     for evt in events {
         match evt {
             ProtocolEvent::SecureInit { from_nick, ephemeral_pub_b64, identity_pub_b64 } => {
-                if !app.dm_targets.contains(&from_nick) {
-                    app.dm_targets.push(from_nick.clone());
+                let server = app.current_server.as_deref().unwrap_or("unknown").to_string();
+                let dms = app.dm_targets_per_server.entry(server.to_string()).or_default();
+                if !dms.contains(&from_nick) {
+                    dms.push(from_nick.clone());
                 }
-                app.push_chat_log(&from_nick, &format!("*** {} REQUESTED SECURE CONNECTION ***", from_nick));
+                app.push_chat_log(&server, &from_nick, &format!("*** {} REQUESTED SECURE CONNECTION ***", from_nick));
 
                 // TOFU check
-                let server = app.current_server.as_deref().unwrap_or("unknown").to_string();
                 let tofu = app.known_keys.check(&from_nick, &server, &identity_pub_b64);
                 let key_changed = matches!(tofu, TofuResult::KeyChanged);
 
                 match &tofu {
                     TofuResult::FirstContact => {
                         let fp = key_fingerprint(&identity_pub_b64);
-                        app.push_chat_log(&from_nick, &format!("First contact with {} -- key fingerprint: {}", from_nick, fp));
+                        app.push_chat_log(&server, &from_nick, &format!("First contact with {} -- key fingerprint: {}", from_nick, fp));
                     }
                     TofuResult::KeyMatch { verified } => {
                         if *verified {
-                            app.push_chat_log(&from_nick, &format!("Key matches known VERIFIED identity for {}.", from_nick));
+                            app.push_chat_log(&server, &from_nick, &format!("Key matches known VERIFIED identity for {}.", from_nick));
                         } else {
-                            app.push_chat_log(&from_nick, &format!("Key matches known identity for {}.", from_nick));
+                            app.push_chat_log(&server, &from_nick, &format!("Key matches known identity for {}.", from_nick));
                         }
                     }
                     TofuResult::KeyChanged => {
-                        app.push_chat_log(&from_nick, &format!("⚠ WARNING: {}'s identity key has CHANGED since last session!", from_nick));
-                        app.push_chat_log(&from_nick, "This could indicate a man-in-the-middle attack.");
+                        app.push_chat_log(&server, &from_nick, &format!("⚠ WARNING: {}'s identity key has CHANGED since last session!", from_nick));
+                        app.push_chat_log(&server, &from_nick, "This could indicate a man-in-the-middle attack.");
                     }
                 }
 
@@ -2872,8 +2995,9 @@ fn process_protocol_events(
                 app.secure_accept_key_changed = key_changed;
             }
             ProtocolEvent::SecureAck { from_nick, ephemeral_pub_b64, identity_pub_b64 } => {
+                let server = app.current_server.as_deref().unwrap_or("unknown").to_string();
                 if app.pending_secure.remove(&from_nick) {
-                    app.push_chat_log(&from_nick, "Key exchange response received...");
+                    app.push_chat_log(&server, &from_nick, "Key exchange response received...");
 
                     let their_identity_bytes: [u8; 32] = match base64::engine::general_purpose::STANDARD
                         .decode(&identity_pub_b64)
@@ -2882,29 +3006,28 @@ fn process_protocol_events(
                     {
                         Some(b) => b,
                         None => {
-                            app.push_chat_log(&from_nick, "Secure handshake failed: invalid identity key.");
+                            app.push_chat_log(&server, &from_nick, "Secure handshake failed: invalid identity key.");
                             continue;
                         }
                     };
 
                     // TOFU check
-                    let server = app.current_server.as_deref().unwrap_or("unknown").to_string();
                     let tofu = app.known_keys.check(&from_nick, &server, &identity_pub_b64);
                     match &tofu {
                         TofuResult::FirstContact => {
                             let fp = key_fingerprint(&identity_pub_b64);
-                            app.push_chat_log(&from_nick, &format!("First contact with {} -- key fingerprint: {}", from_nick, fp));
+                            app.push_chat_log(&server, &from_nick, &format!("First contact with {} -- key fingerprint: {}", from_nick, fp));
                         }
                         TofuResult::KeyMatch { verified } => {
                             if *verified {
-                                app.push_chat_log(&from_nick, &format!("Key matches known VERIFIED identity for {}.", from_nick));
+                                app.push_chat_log(&server, &from_nick, &format!("Key matches known VERIFIED identity for {}.", from_nick));
                             } else {
-                                app.push_chat_log(&from_nick, &format!("Key matches known identity for {}.", from_nick));
+                                app.push_chat_log(&server, &from_nick, &format!("Key matches known identity for {}.", from_nick));
                             }
                         }
                         TofuResult::KeyChanged => {
-                            app.push_chat_log(&from_nick, &format!("⚠ WARNING: {}'s identity key has CHANGED since last session!", from_nick));
-                            app.push_chat_log(&from_nick, "This could indicate a man-in-the-middle attack. Session aborted.");
+                            app.push_chat_log(&server, &from_nick, &format!("⚠ WARNING: {}'s identity key has CHANGED since last session!", from_nick));
+                            app.push_chat_log(&server, &from_nick, "This could indicate a man-in-the-middle attack. Session aborted.");
                             app.pending_secure_ephemeral.remove(&from_nick);
                             continue;
                         }
@@ -2918,7 +3041,7 @@ fn process_protocol_events(
                     let ephemeral = match app.pending_secure_ephemeral.remove(&from_nick) {
                         Some(kp) => kp,
                         None => {
-                            app.push_chat_log(&from_nick, "Secure handshake failed: no ephemeral key found.");
+                            app.push_chat_log(&server, &from_nick, "Secure handshake failed: no ephemeral key found.");
                             continue;
                         }
                     };
@@ -2931,25 +3054,27 @@ fn process_protocol_events(
                         their_identity_bytes,
                     ) {
                         Ok(session) => {
-                            app.secure_sessions.insert(from_nick.clone(), session);
+                            app.secure_sessions.insert(app::msg_key(&server, &from_nick), session);
                             let fp = key_fingerprint(&identity_pub_b64);
-                            app.push_chat_log(&from_nick, &format!("Key fingerprint: {}", fp));
-                            app.push_chat_log(&from_nick, "*** SECURE CONNECTION ESTABLISHED ***");
-                            app.push_chat_log(&from_nick, "Messages are now end-to-end encrypted (X25519 + ChaCha20-Poly1305).");
+                            app.push_chat_log(&server, &from_nick, &format!("Key fingerprint: {}", fp));
+                            app.push_chat_log(&server, &from_nick, "*** SECURE CONNECTION ESTABLISHED ***");
+                            app.push_chat_log(&server, &from_nick, "Messages are now end-to-end encrypted (X25519 + ChaCha20-Poly1305).");
                             if !app.known_keys.is_verified(&from_nick, &server) {
-                                app.push_chat_log(&from_nick, "Use :verify to compare verification codes.");
+                                app.push_chat_log(&server, &from_nick, "Use :verify to compare verification codes.");
                             }
                             app.status_message = format!("Secure session established with {}.", from_nick);
                         }
                         Err(e) => {
-                            app.push_chat_log(&from_nick, &format!("Secure handshake failed: {}", e));
+                            app.push_chat_log(&server, &from_nick, &format!("Secure handshake failed: {}", e));
                             app.status_message = format!("Secure handshake with {} failed: {}", from_nick, e);
                         }
                     }
                 }
             }
             ProtocolEvent::Encrypted { from_nick, nonce_b64, ciphertext_b64 } => {
-                if let Some(session) = app.secure_sessions.get_mut(&from_nick) {
+                let server = app.current_server.as_deref().unwrap_or("unknown").to_string();
+                let sec_key = app::msg_key(&server, &from_nick);
+                if let Some(session) = app.secure_sessions.get_mut(&sec_key) {
                     match session.decrypt(&nonce_b64, &ciphertext_b64) {
                         Ok(plaintext) => {
                             let mut line = MessageLine {
@@ -2968,10 +3093,11 @@ fn process_protocol_events(
                                     spawn_image_download(url, image_id, irc_tx, rt);
                                 }
                             }
-                            app.push_message(&from_nick, line);
+                            app.push_message(&server, &from_nick, line);
                         }
                         Err(e) => {
                             app.push_message(
+                                &server,
                                 &from_nick,
                                 MessageLine {
                                     source: "rvIRC".to_string(),
@@ -2986,8 +3112,8 @@ fn process_protocol_events(
                     }
                 } else {
                     // No session: if we know this peer (TOFU), auto-initiate re-secure once per 60s
-                    let server = app.current_server.as_deref().unwrap_or("unknown");
-                    let known = app.known_keys.lookup(&from_nick, server).is_some();
+                    let server = app.current_server.as_deref().unwrap_or("unknown").to_string();
+                    let known = app.known_keys.lookup(&from_nick, &server).is_some();
                     let already_pending = app.pending_secure.contains(&from_nick);
                     let rate_ok = app.last_auto_rekey.get(&from_nick).map_or(true, |t| {
                         std::time::Instant::now().duration_since(*t) >= std::time::Duration::from_secs(60)
@@ -2995,7 +3121,7 @@ fn process_protocol_events(
 
                     if known && !already_pending && rate_ok {
                         app.last_auto_rekey.insert(from_nick.clone(), std::time::Instant::now());
-                        if let Some(ref c) = client {
+                        if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                             let ephemeral = crypto::Keypair::generate();
                             let ephemeral_pub_b64 = ephemeral.public_key_b64();
                             let identity_pub_b64 = app.keypair.public_key_b64();
@@ -3003,15 +3129,17 @@ fn process_protocol_events(
                             if c.send_privmsg(&from_nick, &msg).is_ok() {
                                 app.pending_secure.insert(from_nick.clone());
                                 app.pending_secure_ephemeral.insert(from_nick.clone(), ephemeral);
-                                if !app.dm_targets.contains(&from_nick) {
-                                    app.dm_targets.push(from_nick.clone());
+                                let dms = app.dm_targets_per_server.entry(server.to_string()).or_default();
+                                if !dms.contains(&from_nick) {
+                                    dms.push(from_nick.clone());
                                 }
-                                app.push_chat_log(&from_nick, "*** No secure session. Sending key exchange to re-establish... ***");
+                                app.push_chat_log(&server, &from_nick, "*** No secure session. Sending key exchange to re-establish... ***");
                             }
                         }
                     }
 
                     app.push_message(
+                        &server,
                         &from_nick,
                         MessageLine {
                             source: from_nick.clone(),
@@ -3025,6 +3153,7 @@ fn process_protocol_events(
                 }
             }
             ProtocolEvent::WormholeOffer { from_nick, code, filename, size } => {
+                let server = app.current_server.as_deref().unwrap_or("unknown").to_string();
                 let size_display = if size >= 1_048_576 {
                     format!("{:.1} MB", size as f64 / 1_048_576.0)
                 } else if size >= 1024 {
@@ -3032,7 +3161,7 @@ fn process_protocol_events(
                 } else {
                     format!("{} B", size)
                 };
-                app.push_chat_log(&from_nick, &format!(
+                app.push_chat_log(&server, &from_nick, &format!(
                     "*** {} wants to send you {} ({}) ***",
                     from_nick, filename, size_display
                 ));
@@ -3043,11 +3172,13 @@ fn process_protocol_events(
                 app.file_receive_code = code;
             }
             ProtocolEvent::WormholeComplete { from_nick } => {
-                app.push_chat_log(&from_nick, "*** File transfer completed. ***");
+                let server = app.current_server.as_deref().unwrap_or("unknown").to_string();
+                app.push_chat_log(&server, &from_nick, "*** File transfer completed. ***");
                 app.status_message = format!("File transfer to {} completed.", from_nick);
             }
             ProtocolEvent::WormholeReject { from_nick } => {
-                app.push_chat_log(&from_nick, "*** File transfer rejected. ***");
+                let server = app.current_server.as_deref().unwrap_or("unknown").to_string();
+                app.push_chat_log(&server, &from_nick, "*** File transfer rejected. ***");
                 app.status_message = format!("{} rejected the file transfer.", from_nick);
             }
         }

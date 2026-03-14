@@ -18,38 +18,38 @@ pub type IrcMessageTx = mpsc::UnboundedSender<IrcMessage>;
 #[allow(dead_code)]
 pub enum IrcMessage {
     /// Server acknowledged these caps (e.g. echo-message, multi-prefix).
-    CapsAcked(Vec<String>),
+    CapsAcked { server: String, caps: Vec<String> },
     /// Server rejected these caps (NAK).
-    CapsNak(Vec<String>),
+    CapsNak { server: String, caps: Vec<String> },
     /// Caps we requested (for display: requested - acked = nakd).
-    CapRequested(Vec<String>),
-    Line { target: String, line: MessageLine },
-    JoinedChannel(String),
-    PartedChannel(String),
-    UserList { channel: String, users: Vec<String> },
+    CapRequested { server: String, caps: Vec<String> },
+    Line { server: String, target: String, line: MessageLine },
+    JoinedChannel { server: String, channel: String },
+    PartedChannel { server: String, channel: String },
+    UserList { server: String, channel: String, users: Vec<String> },
     /// (channel name, optional user count from LIST)
-    ChannelList(Vec<(String, Option<u32>)>),
+    ChannelList { server: String, list: Vec<(String, Option<u32>)> },
     Connected { server: String },
-    Disconnected,
-    WhoisResult { nick: String, lines: Vec<String> },
+    Disconnected { server: String },
+    WhoisResult { server: String, nick: String, lines: Vec<String> },
     /// Channel topic (332). None = no topic (331).
-    Topic { channel: String, topic: Option<String> },
+    Topic { server: String, channel: String, topic: Option<String> },
     /// Channel modes (324): +modes mode_params
-    ChannelModes { channel: String, modes: String },
+    ChannelModes { server: String, channel: String, modes: String },
     /// INVITE nick channel
-    Invite { nick: String, channel: String },
+    Invite { server: String, nick: String, channel: String },
     /// 433: nickname in use, try alt
-    NickInUse,
+    NickInUse { server: String },
     /// Incoming CTCP request (VERSION, PING, TIME) - main loop sends reply.
-    CtcpRequest { from_nick: String, target: String, tag: String, data: String },
+    CtcpRequest { server: String, from_nick: String, target: String, tag: String, data: String },
     /// Send a PRIVMSG from an async task (e.g. wormhole code relay).
-    SendPrivmsg { target: String, text: String },
+    SendPrivmsg { server: String, target: String, text: String },
     /// Send to target, encrypting if a secure session exists (e.g. wormhole offer).
-    SendPrivmsgOrEncrypt { target: String, text: String },
-    /// Status message from an async task.
+    SendPrivmsgOrEncrypt { server: String, target: String, text: String },
+    /// Status message from an async task (no server - global status bar).
     Status(String),
     /// In-chat log message (displayed as a system message in a DM/channel window).
-    ChatLog { target: String, text: String },
+    ChatLog { server: String, target: String, text: String },
     /// Downloaded image ready for inline display.
     ImageReady { image_id: usize, image: image::DynamicImage },
     /// Animated GIF ready: pre-decoded frames + per-frame delays.
@@ -60,6 +60,7 @@ pub enum IrcMessage {
     },
     /// Wormhole transfer progress (bytes done, total). Throttled in callback.
     TransferProgress {
+        server: String,
         nick: String,
         filename: String,
         bytes: u64,
@@ -67,19 +68,19 @@ pub enum IrcMessage {
         is_send: bool,
     },
     /// Wormhole transfer finished (success or failure). Hides progress popup.
-    TransferComplete { nick: String, filename: String, is_send: bool, success: bool },
+    TransferComplete { server: String, nick: String, filename: String, is_send: bool, success: bool },
     /// MONITOR 730: nicks came online.
-    MonOnline { nicks: Vec<String> },
+    MonOnline { server: String, nicks: Vec<String> },
     /// MONITOR 731: nicks went offline.
-    MonOffline { nicks: Vec<String> },
+    MonOffline { server: String, nicks: Vec<String> },
     /// away-notify: nick set or cleared away status. away=true if away, false if back.
-    FriendAway { nick: String, away: bool },
+    FriendAway { server: String, nick: String, away: bool },
     /// IRCv3 typing indicator: nick typing in target with status (active|paused|done).
-    Typing { nick: String, target: String, status: String },
+    Typing { server: String, nick: String, target: String, status: String },
     /// Request chat history for target (channel or DM). Emitted when we join a channel.
-    RequestChathistory { target: String },
+    RequestChathistory { server: String, target: String },
     /// Chat history batch from server (draft/chathistory). Prepend to target buffer.
-    ChathistoryBatch { target: String, lines: Vec<MessageLine> },
+    ChathistoryBatch { server: String, target: String, lines: Vec<MessageLine> },
 }
 
 fn cap_to_name(c: &Capability) -> String {
@@ -262,13 +263,12 @@ pub fn connect(
         Ok::<_, String>((client, stream, acked_caps, requested))
     })?;
 
-    let _ = tx.send(IrcMessage::Connected {
-        server: server_entry.name.clone(),
-    });
-    let _ = tx.send(IrcMessage::CapRequested(requested.clone()));
+    let server = server_entry.name.clone();
+    let _ = tx.send(IrcMessage::Connected { server: server.clone() });
+    let _ = tx.send(IrcMessage::CapRequested { server: server.clone(), caps: requested.clone() });
     // Forward acked caps from SASL loop (non-SASL path gets them via run_stream)
     if !acked_caps.is_empty() {
-        let _ = tx.send(IrcMessage::CapsAcked(acked_caps));
+        let _ = tx.send(IrcMessage::CapsAcked { server, caps: acked_caps });
     }
     Ok((client, stream))
 }
@@ -370,8 +370,8 @@ fn message_line(msg: &irc::proto::Message) -> Option<(String, MessageLine)> {
 
 /// Run the IRC stream in a loop and send parsed messages to `tx`.
 /// Call this from a tokio task; it runs until the stream ends.
-/// `our_nick` is used to detect our own JOIN and request chathistory.
-pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, our_nick: Option<String>) {
+/// `server` identifies this connection; `our_nick` detects our own JOIN for chathistory.
+pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, server: String, our_nick: Option<String>) {
     use irc::proto::command::BatchSubCommand;
     use futures_util::StreamExt;
     let mut pending_users: HashMap<String, Vec<String>> = HashMap::new();
@@ -408,7 +408,7 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, our_nick: Op
                     } else if batch_id.starts_with('-') {
                         let id = batch_id[1..].to_string();
                         if let Some((target, lines)) = chathistory_batches.remove(&id) {
-                            let _ = tx.send(IrcMessage::ChathistoryBatch { target, lines });
+                            let _ = tx.send(IrcMessage::ChathistoryBatch { server: server.clone(), target, lines });
                         }
                     }
                 }
@@ -430,14 +430,14 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, our_nick: Op
                     let acked = params.as_deref().or_else(|| multi.as_deref()).unwrap_or("");
                     let caps: Vec<String> = acked.split_whitespace().map(|c| c.to_lowercase()).collect();
                     if !caps.is_empty() {
-                        let _ = tx.send(IrcMessage::CapsAcked(caps));
+                        let _ = tx.send(IrcMessage::CapsAcked { server: server.clone(), caps });
                     }
                 }
                 if let C::CAP(_, CapSubCommand::NAK, multi, params) = &msg.command {
                     let nakd = params.as_deref().or_else(|| multi.as_deref()).unwrap_or("");
                     let caps: Vec<String> = nakd.split_whitespace().map(|c| c.to_lowercase()).collect();
                     if !caps.is_empty() {
-                        let _ = tx.send(IrcMessage::CapsNak(caps));
+                        let _ = tx.send(IrcMessage::CapsNak { server: server.clone(), caps });
                     }
                 }
 
@@ -469,7 +469,7 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, our_nick: Op
                         if args.len() >= 2 {
                             let channel = args[1].clone();
                             if let Some(users) = pending_users.remove(&channel) {
-                                let _ = tx.send(IrcMessage::UserList { channel, users });
+                                let _ = tx.send(IrcMessage::UserList { server: server.clone(), channel, users });
                             }
                         }
                     }
@@ -542,7 +542,7 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, our_nick: Op
                             if lines.is_empty() {
                                 lines.push("(no whois data)".to_string());
                             }
-                            let _ = tx.send(IrcMessage::WhoisResult { nick, lines });
+                            let _ = tx.send(IrcMessage::WhoisResult { server: server.clone(), nick, lines });
                             pending_whois = PendingWhois::default();
                         }
                     }
@@ -555,21 +555,19 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, our_nick: Op
                     }
                     C::Response(Response::RPL_LISTEND, _) => {
                         let list = std::mem::take(&mut pending_list);
-                        let _ = tx.send(IrcMessage::ChannelList(list));
+                        let _ = tx.send(IrcMessage::ChannelList { server: server.clone(), list });
                     }
                     C::Response(Response::RPL_TOPIC, args) => {
                         if args.len() >= 3 {
                             let channel = args[1].clone();
                             let topic = args.get(2).cloned();
-                            let _ = tx.send(IrcMessage::Topic {
-                                channel,
-                                topic,
-                            });
+                            let _ = tx.send(IrcMessage::Topic { server: server.clone(), channel, topic });
                         }
                     }
                     C::Response(Response::RPL_NOTOPIC, args) => {
                         if args.len() >= 2 {
                             let _ = tx.send(IrcMessage::Topic {
+                                server: server.clone(),
                                 channel: args[1].clone(),
                                 topic: None,
                             });
@@ -581,14 +579,11 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, our_nick: Op
                             let modes = args[2].clone();
                             let params = args.get(3).cloned().unwrap_or_default();
                             let full = if params.is_empty() { modes } else { format!("{} {}", modes, params) };
-                            let _ = tx.send(IrcMessage::ChannelModes {
-                                channel,
-                                modes: full,
-                            });
+                            let _ = tx.send(IrcMessage::ChannelModes { server: server.clone(), channel, modes: full });
                         }
                     }
                     C::Response(Response::ERR_NICKNAMEINUSE, _) => {
-                        let _ = tx.send(IrcMessage::NickInUse);
+                        let _ = tx.send(IrcMessage::NickInUse { server: server.clone() });
                     }
                     C::Response(Response::RPL_MONONLINE, args) => {
                         if args.len() >= 2 {
@@ -599,7 +594,7 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, our_nick: Op
                                 .filter(|s| !s.is_empty())
                                 .collect();
                             if !nicks.is_empty() {
-                                let _ = tx.send(IrcMessage::MonOnline { nicks });
+                                let _ = tx.send(IrcMessage::MonOnline { server: server.clone(), nicks });
                             }
                         }
                     }
@@ -612,7 +607,7 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, our_nick: Op
                                 .filter(|s| !s.is_empty())
                                 .collect();
                             if !nicks.is_empty() {
-                                let _ = tx.send(IrcMessage::MonOffline { nicks });
+                                let _ = tx.send(IrcMessage::MonOffline { server: server.clone(), nicks });
                             }
                         }
                     }
@@ -620,11 +615,12 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, our_nick: Op
                         let nick = prefix_nick(msg.prefix.as_ref());
                         if !nick.is_empty() && nick != "*" {
                             let away = away_msg.is_some();
-                            let _ = tx.send(IrcMessage::FriendAway { nick, away });
+                            let _ = tx.send(IrcMessage::FriendAway { server: server.clone(), nick, away });
                         }
                     }
                     C::INVITE(ref _nick, ref channel) => {
                         let _ = tx.send(IrcMessage::Invite {
+                            server: server.clone(),
                             nick: prefix_nick(msg.prefix.as_ref()),
                             channel: channel.clone(),
                         });
@@ -648,6 +644,7 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, our_nick: Op
                                     if let Some(ref status) = tag.1 {
                                         if matches!(status.as_str(), "active" | "paused" | "done") {
                                             let _ = tx.send(IrcMessage::Typing {
+                                                server: server.clone(),
                                                 nick: nick.clone(),
                                                 target: target.clone(),
                                                 status: status.clone(),
@@ -666,6 +663,7 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, our_nick: Op
                                 let timestamp = server_time_from_tags(msg.tags.as_ref());
                                 let account = account_from_tags(msg.tags.as_ref()).unwrap_or(None);
                                 let _ = tx.send(IrcMessage::Line {
+                                    server: server.clone(),
                                     target: target.clone(),
                                     line: MessageLine {
                                         source,
@@ -679,6 +677,7 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, our_nick: Op
                             } else if matches!(tag.as_str(), "VERSION" | "PING" | "TIME") {
                                 let from_nick = prefix_nick(msg.prefix.as_ref());
                                 let _ = tx.send(IrcMessage::CtcpRequest {
+                                    server: server.clone(),
                                     from_nick,
                                     target: target.clone(),
                                     tag: tag.clone(),
@@ -696,29 +695,30 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, our_nick: Op
                     || matches!(&msg.command, C::Raw(ref cmd, _) if cmd.eq_ignore_ascii_case("TAGMSG"));
                 if !should_skip_line {
                     if let Some((target, line)) = message_line(&msg) {
-                    let _ = tx.send(IrcMessage::Line {
-                        target: target.clone(),
-                        line: line.clone(),
-                    });
-                    match &msg.command {
-                        C::JOIN(chan, _, _) => {
-                            let _ = tx.send(IrcMessage::JoinedChannel(chan.clone()));
-                            if our_nick.as_deref() == Some(prefix_nick(msg.prefix.as_ref()).as_str()) {
-                                let _ = tx.send(IrcMessage::RequestChathistory { target: chan.clone() });
+                        let _ = tx.send(IrcMessage::Line {
+                            server: server.clone(),
+                            target: target.clone(),
+                            line: line.clone(),
+                        });
+                        match &msg.command {
+                            C::JOIN(chan, _, _) => {
+                                let _ = tx.send(IrcMessage::JoinedChannel { server: server.clone(), channel: chan.clone() });
+                                if our_nick.as_deref() == Some(prefix_nick(msg.prefix.as_ref()).as_str()) {
+                                    let _ = tx.send(IrcMessage::RequestChathistory { server: server.clone(), target: chan.clone() });
+                                }
                             }
+                            C::PART(chan, _) => {
+                                let _ = tx.send(IrcMessage::PartedChannel { server: server.clone(), channel: chan.clone() });
+                            }
+                            _ => {}
                         }
-                        C::PART(chan, _) => {
-                            let _ = tx.send(IrcMessage::PartedChannel(chan.clone()));
-                        }
-                        _ => {}
                     }
-                }
                 }
             }
             Err(_) => break,
         }
     }
-    let _ = tx.send(IrcMessage::Disconnected);
+    let _ = tx.send(IrcMessage::Disconnected { server });
 }
 
 /// Parse CTCP (\x01TAG data\x01). Returns (TAG, data) or None.

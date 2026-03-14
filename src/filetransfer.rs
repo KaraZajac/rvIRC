@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 /// the wormhole code is available (before blocking on the transfer).
 pub async fn send_file(
     path: &Path,
+    server: String,
     nick: String,
     tx: mpsc::UnboundedSender<IrcMessage>,
 ) -> Result<(), String> {
@@ -25,6 +26,7 @@ pub async fn send_file(
 
     let config = transfer::APP_CONFIG;
     let _ = tx.send(IrcMessage::ChatLog {
+        server: server.clone(),
         target: nick.clone(),
         text: "Creating wormhole connection...".to_string(),
     });
@@ -36,10 +38,12 @@ pub async fn send_file(
 
     let offer = format!("[:rvIRC:WORMHOLE:OFFER:{}:{}:{}]", code, file_name, file_size);
     let _ = tx.send(IrcMessage::SendPrivmsgOrEncrypt {
+        server: server.clone(),
         target: nick.clone(),
         text: offer,
     });
     let _ = tx.send(IrcMessage::ChatLog {
+        server: server.clone(),
         target: nick.clone(),
         text: format!("Wormhole code sent to {}. Waiting for accept...", nick),
     });
@@ -53,6 +57,7 @@ pub async fn send_file(
         .map_err(|e| format!("wormhole connect: {}", e))?;
 
     let _ = tx.send(IrcMessage::ChatLog {
+        server: server.clone(),
         target: nick.clone(),
         text: format!("Sending {} ({} bytes)...", file_name, file_size),
     });
@@ -63,6 +68,7 @@ pub async fn send_file(
 
     let last_pct = AtomicU64::new(0);
     let tx_progress = tx.clone();
+    let server_progress = server.clone();
     let nick_progress = nick.clone();
     let filename_progress = file_name.clone();
     let progress = move |bytes: u64, total: u64| {
@@ -72,6 +78,7 @@ pub async fn send_file(
         if bytes == 0 || pct >= prev + 2 || bytes >= total {
             last_pct.store(pct.min(100), Ordering::Relaxed);
             let _ = tx_progress.send(IrcMessage::TransferProgress {
+                server: server_progress.clone(),
                 nick: nick_progress.clone(),
                 filename: filename_progress.clone(),
                 bytes,
@@ -99,6 +106,7 @@ pub async fn send_file(
 
     let success = result.is_ok();
     let _ = tx.send(IrcMessage::TransferComplete {
+        server: server.clone(),
         nick: nick.clone(),
         filename: file_name.clone(),
         is_send: true,
@@ -108,6 +116,7 @@ pub async fn send_file(
     result.map_err(|e| format!("send: {}", e))?;
 
     let _ = tx.send(IrcMessage::ChatLog {
+        server: server.clone(),
         target: nick.clone(),
         text: format!("File {} sent successfully.", file_name),
     });
@@ -123,6 +132,7 @@ pub async fn send_file(
 pub async fn receive_file(
     code_str: &str,
     save_path: &Path,
+    server: &str,
     nick: &str,
     tx: &mpsc::UnboundedSender<IrcMessage>,
 ) -> Result<(), String> {
@@ -130,6 +140,7 @@ pub async fn receive_file(
     let code: magic_wormhole::Code = code_str.to_string().into();
 
     let _ = tx.send(IrcMessage::ChatLog {
+        server: server.to_string(),
         target: nick.to_string(),
         text: "Connecting to wormhole relay...".to_string(),
     });
@@ -143,6 +154,7 @@ pub async fn receive_file(
         .map_err(|e| format!("wormhole connect: {}", e))?;
 
     let _ = tx.send(IrcMessage::ChatLog {
+        server: server.to_string(),
         target: nick.to_string(),
         text: "Connected. Requesting file...".to_string(),
     });
@@ -162,6 +174,7 @@ pub async fn receive_file(
     };
 
     let _ = tx.send(IrcMessage::ChatLog {
+        server: server.to_string(),
         target: nick.to_string(),
         text: format!("Receiving file to {}...", save_path.display()),
     });
@@ -176,6 +189,7 @@ pub async fn receive_file(
 
     let last_pct = AtomicU64::new(0);
     let tx_progress = tx.clone();
+    let server_progress = server.to_string();
     let nick_progress = nick.to_string();
     let filename_progress = filename_display.clone();
     let progress = move |received: u64, total: u64| {
@@ -185,6 +199,7 @@ pub async fn receive_file(
         if received == 0 || pct >= prev + 2 || received >= total {
             last_pct.store(pct.min(100), Ordering::Relaxed);
             let _ = tx_progress.send(IrcMessage::TransferProgress {
+                server: server_progress.clone(),
                 nick: nick_progress.clone(),
                 filename: filename_progress.clone(),
                 bytes: received,
@@ -205,6 +220,7 @@ pub async fn receive_file(
 
     let success = result.is_ok();
     let _ = tx.send(IrcMessage::TransferComplete {
+        server: server.to_string(),
         nick: nick.to_string(),
         filename: filename_display,
         is_send: false,
@@ -214,6 +230,7 @@ pub async fn receive_file(
     result.map_err(|e| format!("receive: {}", e))?;
 
     let _ = tx.send(IrcMessage::ChatLog {
+        server: server.to_string(),
         target: nick.to_string(),
         text: format!("File saved to {}", save_path.display()),
     });

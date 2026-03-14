@@ -23,6 +23,20 @@
 - **IRC formatting**: Messages support bold, italic, strikethrough, and colors. Use `*italic*`, `**bold**`, `***bold italic***`, `~~strikethrough~~`, `||spoiler||` (rendered dim), and `:colorname: text :colorname:` for colors (e.g. `:blue:`, `:red:`, `:green:`). Use `:normal:` to reset formatting (e.g. `:red: red :normal: back to default`). Compatible with [IRC format codes](https://modern.ircdocs.horse/formatting).
 - **rvIRC effects** (sent as literal text; only rvIRC displays them): `@@text@@` = animated rainbow (cycles colors). `$$text$$` = scared (randomly flickers between normal, white, black, grey, bold).
 
+## IRC capabilities
+
+rvIRC negotiates the following IRCv3 capabilities where the server supports them:
+
+| Capability | Requested | Used for |
+|------------|:---------:|----------|
+| `away-notify` | ✓ | Friends list: away status (yellow) vs online (green) |
+| `message-tags` | ✓ | Typing indicators, server-time in PRIVMSG tags |
+| `server-time` | ✓ | Timestamps on messages when server provides `time` tag |
+| `batch` | ✓ | Batching for chathistory responses |
+| `draft/chathistory` | ✓ | Chat history on channel join |
+| `echo-message` | — | When server acks: server echoes our messages; else rvIRC local-echoes |
+| `sasl` | ✓ | SASL PLAIN or EXTERNAL (when `sasl_mechanism` set in server config) |
+
 ## Build & run
 
 ```bash

@@ -217,7 +217,9 @@ pub fn message_wrapped_height(m: &MessageLine, _current_nick: Option<&str>, widt
 }
 
 fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
-    let target_key = app.current_channel.as_deref().unwrap_or("*server*").to_string();
+    let server = app.current_server.as_deref().unwrap_or("");
+    let target = app.current_channel.as_deref().unwrap_or("*server*");
+    let target_key = crate::app::msg_key(server, target);
     let title = app.current_target_title();
     let block = Block::default()
         .borders(Borders::ALL)
@@ -266,7 +268,7 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
     }
 
     // Reserve 1 row at bottom for typing indicator when present
-    let typing_nicks = app.typing_nicks_for_target(&target_key);
+    let typing_nicks = app.typing_nicks_for_target(server, target);
     let typing_reserved = if typing_nicks.is_empty() { 0 } else { 1 };
     let message_height = content_height.saturating_sub(typing_reserved);
 
@@ -528,41 +530,41 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(paragraph, area);
 }
 
-fn target_display_label(app: &App, target: &str) -> String {
+fn target_display_label_for_entry(server: &str, target: &str) -> String {
     if target == "*server*" {
-        app.current_server
-            .as_deref()
-            .unwrap_or("Server")
-            .to_string()
+        server.to_string()
     } else {
         target.to_string()
     }
 }
 
 fn draw_channels_pane(f: &mut Frame, area: Rect, app: &App) {
+    use crate::app::msg_key;
     let show_selector = app.panel_focus == PanelFocus::Channels;
     let list = app.channels_list();
     let items: Vec<ListItem> = list
         .iter()
         .enumerate()
-        .map(|(i, t)| {
-            let label = target_display_label(app, t);
-            let secure = app.secure_sessions.contains_key(t);
+        .map(|(i, (s, t))| {
+            let label = target_display_label_for_entry(s, t);
+            let key = msg_key(s, t);
+            let secure = app.secure_sessions.contains_key(&key);
             let prefix = if show_selector && i == app.channel_index {
                 "> "
-            } else {
+            } else if t == "*server*" {
                 "  "
+            } else {
+                "    "
             };
-            let style = if app.unread_mentions.contains(t) {
+            let style = if app.unread_mentions.contains(&key) {
                 Style::default().fg(Color::Red)
-            } else if app.unread_targets.contains(t) {
+            } else if app.unread_targets.contains(&key) {
                 Style::default().fg(Color::Green)
             } else {
                 Style::default()
             };
             if secure {
-                let server = app.current_server.as_deref().unwrap_or("unknown");
-                let verified = app.known_keys.is_verified(t, server);
+                let verified = app.known_keys.is_verified(t, s);
                 let mut spans = vec![
                     Span::styled(prefix, style),
                     Span::styled("\u{1F512}", Style::default().fg(Color::Green)),
@@ -585,28 +587,29 @@ fn draw_channels_pane(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_messages_pane(f: &mut Frame, area: Rect, app: &App) {
+    use crate::app::msg_key;
     let show_selector = app.panel_focus == PanelFocus::Messages;
     let list = app.messages_list();
     let items: Vec<ListItem> = list
         .iter()
         .enumerate()
-        .map(|(i, t)| {
-            let secure = app.secure_sessions.contains_key(t);
+        .map(|(i, (s, nick))| {
+            let key = msg_key(s, nick);
+            let secure = app.secure_sessions.contains_key(&key);
             let prefix = if show_selector && i == app.messages_index {
                 "> "
             } else {
                 "  "
             };
-            let style = if app.unread_mentions.contains(t) {
+            let style = if app.unread_mentions.contains(&key) {
                 Style::default().fg(Color::Red)
-            } else if app.unread_targets.contains(t) {
+            } else if app.unread_targets.contains(&key) {
                 Style::default().fg(Color::Green)
             } else {
                 Style::default()
             };
             if secure {
-                let server = app.current_server.as_deref().unwrap_or("unknown");
-                let verified = app.known_keys.is_verified(t, server);
+                let verified = app.known_keys.is_verified(nick, s);
                 let mut spans = vec![
                     Span::styled(prefix, style),
                     Span::styled("\u{1F512}", Style::default().fg(Color::Green)),
@@ -614,10 +617,10 @@ fn draw_messages_pane(f: &mut Frame, area: Rect, app: &App) {
                 if verified {
                     spans.push(Span::styled("\u{2714}", Style::default().fg(Color::Green)));
                 }
-                spans.push(Span::styled(format!("{}  ", t), style));
+                spans.push(Span::styled(format!("{}  ", nick), style));
                 ListItem::new(Line::from(spans))
             } else {
-                ListItem::new(Line::from(Span::styled(format!("{}{}  ", prefix, t), style)))
+                ListItem::new(Line::from(Span::styled(format!("{}{}  ", prefix, nick), style)))
             }
         })
         .collect();

@@ -12,7 +12,7 @@ pub enum CommandResult {
     Servers,
     Connect(String),
     Reconnect,
-    Disconnect,
+    Disconnect(Option<String>),
     Quit(()),
     Msg { nick: String, text: String },
     Me(String), // ACTION to current target
@@ -102,7 +102,11 @@ pub fn parse(line: &str) -> CommandResult {
             }
         }
         "reconnect" => CommandResult::Reconnect,
-        "disconnect" => CommandResult::Disconnect,
+        "disconnect" => {
+            let rest = rest.trim();
+            let server = if rest.is_empty() { None } else { Some(rest.to_string()) };
+            CommandResult::Disconnect(server)
+        }
         "quit" | "exit" => CommandResult::Quit(()),
         "q" if rest.trim().is_empty() => CommandResult::Quit(()),
         "me" => {
