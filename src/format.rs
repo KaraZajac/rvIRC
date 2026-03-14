@@ -4,9 +4,10 @@
 // IRC line limit is 512 bytes; reserve ~50 for "PRIVMSG target :\r\n"
 pub const MAX_MESSAGE_BYTES: usize = 460;
 
-// For encrypted messages: [:rvIRC:ENC:nonce:ciphertext] adds ~30 + base64 overhead.
-// ChaCha20-Poly1305: ciphertext = plaintext + 16. Base64 expands 4/3. Use ~300 bytes plaintext.
-pub const MAX_ENCRYPTED_PLAINTEXT_BYTES: usize = 300;
+// For encrypted messages: [:rvIRC:ENC:nonce:ciphertext] adds ~31 bytes + base64 overhead.
+// IRC line limit is 512 bytes total; reserve ~100 for "PRIVMSG nick :" etc. Payload ~400 bytes max.
+// ChaCha20-Poly1305: ciphertext = plaintext + 16. Base64 expands 4/3. 200 bytes plaintext → ~287 B64 + 31 ≈ 318.
+pub const MAX_ENCRYPTED_PLAINTEXT_BYTES: usize = 200;
 
 /// Split text into chunks that fit within IRC message limits, at UTF-8 boundaries.
 /// Returns the original string as sole chunk if it fits; otherwise multiple chunks.

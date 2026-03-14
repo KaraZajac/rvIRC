@@ -5,8 +5,10 @@ use crate::config::{RvConfig, ServerEntry};
 use irc::client::data::Config as IrcConfig;
 use irc::client::prelude::*;
 use irc::proto::caps::Capability;
+use irc::proto::command::CapSubCommand;
 use irc::client::ClientStream;
 use irc::proto::{Command as IrcCommand, Response};
+use base64::Engine;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
@@ -68,9 +70,15 @@ pub enum IrcMessage {
     FriendAway { nick: String, away: bool },
     /// IRCv3 typing indicator: nick typing in target with status (active|paused|done).
     Typing { nick: String, target: String, status: String },
+    /// Request chat history for target (channel or DM). Emitted when we join a channel.
+    RequestChathistory { target: String },
+    /// Chat history batch from server (draft/chathistory). Prepend to target buffer.
+    ChathistoryBatch { target: String, lines: Vec<MessageLine> },
 }
 
 fn server_entry_to_irc_config(entry: &ServerEntry, rv: &RvConfig) -> IrcConfig {
+    use irc::client::data::ProxyType;
+
     let mut cfg = IrcConfig::default();
     cfg.server = Some(entry.host.clone());
     cfg.port = Some(entry.port);
@@ -80,6 +88,28 @@ fn server_entry_to_irc_config(entry: &ServerEntry, rv: &RvConfig) -> IrcConfig {
     cfg.realname = rv.real_name.clone().or_else(|| cfg.nickname.clone());
     cfg.password = entry.password.clone();
     cfg.channels = vec![];
+
+    if let Some(ref url_str) = entry.proxy_url {
+        if let Ok(url) = url::Url::parse(url_str) {
+            let scheme = url.scheme().to_lowercase();
+            if scheme == "socks5" || scheme == "socks5h" {
+                cfg.proxy_type = Some(ProxyType::Socks5);
+                if let Some(host) = url.host_str() {
+                    cfg.proxy_server = Some(host.to_string());
+                }
+                if let Some(port) = url.port() {
+                    cfg.proxy_port = Some(port);
+                }
+                if !url.username().is_empty() {
+                    cfg.proxy_username = Some(url.username().to_string());
+                }
+                if let Some(pass) = url.password() {
+                    cfg.proxy_password = Some(pass.to_string());
+                }
+            }
+        }
+    }
+
     cfg
 }
 
@@ -89,18 +119,124 @@ pub fn connect(
     tx: IrcMessageTx,
     rt: &tokio::runtime::Runtime,
 ) -> Result<(Client, ClientStream), String> {
+    use futures_util::StreamExt;
+
     let irc_config = server_entry_to_irc_config(server_entry, rv_config);
-    let (client, stream) = rt
-        .block_on(async {
-            let mut client = Client::from_config(irc_config).await.map_err(|e| e.to_string())?;
-            let _ = client.send_cap_req(&[
-                Capability::AwayNotify,
-                Capability::Custom("message-tags"),
-            ]);
+    let sasl_mechanism = server_entry
+        .sasl_mechanism
+        .as_deref()
+        .map(|s| s.to_lowercase());
+
+    let (client, stream) = rt.block_on(async {
+        let mut client = Client::from_config(irc_config.clone()).await.map_err(|e| e.to_string())?;
+
+        let mut caps: Vec<Capability> = vec![
+            Capability::AwayNotify,
+            Capability::Custom("message-tags"),
+            Capability::ServerTime,
+            Capability::Batch,
+            Capability::Custom("draft/chathistory"),
+        ];
+        if sasl_mechanism.is_some() {
+            caps.push(Capability::Sasl);
+        }
+        let _ = client.send_cap_req(&caps);
+
+        let mut stream = client.stream().map_err(|e| e.to_string())?;
+
+        if let Some(ref mechanism) = sasl_mechanism {
+            // Custom SASL registration: consume stream until SASL complete, then send CAP END + identify.
+            let nick = irc_config
+                .nickname
+                .as_deref()
+                .unwrap_or("rvirc")
+                .to_string();
+            let user = irc_config
+                .username
+                .as_deref()
+                .unwrap_or(&nick)
+                .to_string();
+            let real = irc_config
+                .realname
+                .as_deref()
+                .unwrap_or(&nick)
+                .to_string();
+            let server_pass = irc_config.password.clone().unwrap_or_default();
+            let sasl_pass = server_entry.identify_password.clone().unwrap_or_default();
+
+            let mut sasl_acked = false;
+            let mut sasl_sent_mechanism = false;
+
+            while let Some(result) = stream.next().await {
+                let msg = result.map_err(|e| e.to_string())?;
+                match &msg.command {
+                    IrcCommand::CAP(_, CapSubCommand::ACK, _, params) => {
+                        let acked = params.as_deref().unwrap_or("");
+                        if acked.split_whitespace().any(|c| c.eq_ignore_ascii_case("sasl")) {
+                            sasl_acked = true;
+                            if !sasl_sent_mechanism {
+                                sasl_sent_mechanism = true;
+                                match mechanism.as_str() {
+                                    "plain" => {
+                                        let _ = client.send_sasl_plain();
+                                    }
+                                    "external" => {
+                                        let _ = client.send_sasl_external();
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    IrcCommand::AUTHENTICATE(data) => {
+                        if sasl_acked && data.trim() == "+" {
+                            match mechanism.as_str() {
+                                "plain" => {
+                                    let creds = format!("\0{}\0{}", nick, sasl_pass);
+                                    let b64 = base64::engine::general_purpose::STANDARD
+                                        .encode(creds.as_bytes());
+                                    let _ = client.send(IrcCommand::AUTHENTICATE(b64));
+                                }
+                                "external" => {
+                                    let _ = client.send(IrcCommand::AUTHENTICATE("+".to_string()));
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                if let IrcCommand::Response(code, _args) = &msg.command {
+                    match code {
+                        Response::RPL_SASLSUCCESS | Response::ERR_SASLFAIL => {
+                            let _ = client.send(IrcCommand::CAP(
+                                None,
+                                CapSubCommand::END,
+                                None,
+                                None,
+                            ));
+                            if !server_pass.is_empty() {
+                                let _ = client.send(IrcCommand::PASS(server_pass));
+                            }
+                            let _ = client.send(IrcCommand::NICK(nick.clone()));
+                            let _ = client.send(IrcCommand::USER(
+                                user.clone(),
+                                "0".to_string(),
+                                real.clone(),
+                            ));
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        } else {
             client.identify().map_err(|e| e.to_string())?;
-            let stream = client.stream().map_err(|e| e.to_string())?;
-            Ok::<_, String>((client, stream))
-        })?;
+        }
+
+        Ok::<_, String>((client, stream))
+    })?;
+
     let _ = tx.send(IrcMessage::Connected {
         server: server_entry.name.clone(),
     });
@@ -122,6 +258,40 @@ fn format_message_target(msg: &irc::proto::Message) -> Option<String> {
         IrcCommand::PART(ref chan, _) => Some(chan.clone()),
         _ => msg.response_target().map(String::from),
     }
+}
+
+/// Build MessageLine from a PRIVMSG or NOTICE (for chathistory batch). Handles CTCP ACTION.
+fn batch_message_to_line(msg: &irc::proto::Message) -> Option<(String, MessageLine)> {
+    let source = prefix_nick(msg.prefix.as_ref());
+    let timestamp = server_time_from_tags(msg.tags.as_ref());
+    let (target, text, kind) = match &msg.command {
+        IrcCommand::PRIVMSG(t, m) => {
+            if let Some((tag, data)) = parse_ctcp(m) {
+                if tag == "ACTION" {
+                    (t.clone(), data, MessageKind::Action)
+                } else {
+                    (t.clone(), m.clone(), MessageKind::Privmsg)
+                }
+            } else {
+                (t.clone(), m.clone(), MessageKind::Privmsg)
+            }
+        }
+        IrcCommand::NOTICE(t, m) => (t.clone(), m.clone(), MessageKind::Notice),
+        _ => return None,
+    };
+    Some((
+        target.clone(),
+        MessageLine { source, text, kind, image_id: None, timestamp },
+    ))
+}
+
+/// Extract server-time from message tags (IRCv3 server-time). Returns None if absent or parse fails.
+fn server_time_from_tags(tags: Option<&Vec<irc::proto::message::Tag>>) -> Option<chrono::DateTime<chrono::Local>> {
+    let tags = tags?;
+    let time_str = tags.iter().find(|t| t.0 == "time").and_then(|t| t.1.as_deref())?;
+    chrono::DateTime::parse_from_rfc3339(time_str)
+        .ok()
+        .map(|dt| dt.with_timezone(&chrono::Local))
 }
 
 fn message_line(msg: &irc::proto::Message) -> Option<(String, MessageLine)> {
@@ -151,18 +321,22 @@ fn message_line(msg: &irc::proto::Message) -> Option<(String, MessageLine)> {
         }
     };
     let target = format_message_target(msg).unwrap_or_else(|| "*server*".to_string());
+    let timestamp = server_time_from_tags(msg.tags.as_ref());
     Some((
         target,
-        MessageLine { source, text, kind, image_id: None, timestamp: None },
+        MessageLine { source, text, kind, image_id: None, timestamp },
     ))
 }
 
 
 /// Run the IRC stream in a loop and send parsed messages to `tx`.
 /// Call this from a tokio task; it runs until the stream ends.
-pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx) {
+/// `our_nick` is used to detect our own JOIN and request chathistory.
+pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, our_nick: Option<String>) {
+    use irc::proto::command::BatchSubCommand;
     use futures_util::StreamExt;
     let mut pending_users: HashMap<String, Vec<String>> = HashMap::new();
+    let mut chathistory_batches: HashMap<String, (String, Vec<MessageLine>)> = HashMap::new();
     let mut pending_list: Vec<(String, Option<u32>)> = Vec::new();
     #[derive(Default)]
     struct PendingWhois {
@@ -181,6 +355,38 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx) {
         match result {
             Ok(msg) => {
                 use irc::proto::Command as C;
+
+                // BATCH handling for chathistory
+                if let C::BATCH(ref batch_id, ref subcmd, ref params) = msg.command {
+                    if batch_id.starts_with('+') {
+                        let id = batch_id[1..].to_string();
+                        if matches!(subcmd, Some(BatchSubCommand::CUSTOM(t)) if t.eq_ignore_ascii_case("chathistory"))
+                            && params.as_ref().map_or(false, |p| !p.is_empty())
+                        {
+                            let target = params.as_ref().unwrap()[0].clone();
+                            chathistory_batches.insert(id, (target, Vec::new()));
+                        }
+                    } else if batch_id.starts_with('-') {
+                        let id = batch_id[1..].to_string();
+                        if let Some((target, lines)) = chathistory_batches.remove(&id) {
+                            let _ = tx.send(IrcMessage::ChathistoryBatch { target, lines });
+                        }
+                    }
+                }
+
+                // PRIVMSG/NOTICE with batch= tag: collect for chathistory, skip normal handling
+                let in_chathistory_batch = msg.tags.as_ref().and_then(|tags| {
+                    tags.iter().find(|t| t.0 == "batch").and_then(|t| t.1.clone())
+                });
+                if let Some(ref bid) = in_chathistory_batch {
+                    if let Some((_target, ref mut lines)) = chathistory_batches.get_mut(bid) {
+                        if let Some((_t, line)) = batch_message_to_line(&msg) {
+                            lines.push(line);
+                        }
+                        continue;
+                    }
+                }
+
                 match &msg.command {
                     C::Response(Response::RPL_NAMREPLY, args) => {
                         if args.len() >= 4 {
@@ -382,6 +588,7 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx) {
                         if let Some((tag, data)) = parse_ctcp(text) {
                             if tag == "ACTION" {
                                 let source = prefix_nick(msg.prefix.as_ref());
+                                let timestamp = server_time_from_tags(msg.tags.as_ref());
                                 let _ = tx.send(IrcMessage::Line {
                                     target: target.clone(),
                                     line: MessageLine {
@@ -389,7 +596,7 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx) {
                                         text: data,
                                         kind: MessageKind::Action,
                                         image_id: None,
-                                        timestamp: None,
+                                        timestamp,
                                     },
                                 });
                             } else if matches!(tag.as_str(), "VERSION" | "PING" | "TIME") {
@@ -419,6 +626,9 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx) {
                     match &msg.command {
                         C::JOIN(chan, _, _) => {
                             let _ = tx.send(IrcMessage::JoinedChannel(chan.clone()));
+                            if our_nick.as_deref() == Some(prefix_nick(msg.prefix.as_ref()).as_str()) {
+                                let _ = tx.send(IrcMessage::RequestChathistory { target: chan.clone() });
+                            }
                         }
                         C::PART(chan, _) => {
                             let _ = tx.send(IrcMessage::PartedChannel(chan.clone()));

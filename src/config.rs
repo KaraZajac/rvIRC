@@ -49,8 +49,15 @@ pub struct ServerEntry {
     /// Server connection password (sent on connect).
     pub password: Option<String>,
     /// Password to identify with NickServ after connecting (e.g. PRIVMSG NickServ :IDENTIFY <this>).
+    /// Also used as SASL password when sasl_mechanism is "plain".
     #[serde(default)]
     pub identify_password: Option<String>,
+    /// SASL mechanism: "plain", "external", or absent to disable. When set, SASL is used instead of NickServ.
+    #[serde(default)]
+    pub sasl_mechanism: Option<String>,
+    /// SOCKS5 proxy URL (e.g. "socks5://127.0.0.1:1080" or "socks5h://user:pass@proxy:1080").
+    #[serde(default)]
+    pub proxy_url: Option<String>,
     /// Auto-connect to this server on startup: "yes" or "no".
     #[serde(default)]
     pub auto_connect: Option<String>,
@@ -162,6 +169,8 @@ impl RvConfig {
                     tls: true,
                     password: None,
                     identify_password: None,
+                    sasl_mechanism: None,
+                    proxy_url: None,
                     auto_connect: None,
                     auto_join: None,
                 },
@@ -172,6 +181,8 @@ impl RvConfig {
                     tls: true,
                     password: None,
                     identify_password: None,
+                    sasl_mechanism: None,
+                    proxy_url: None,
                     auto_connect: None,
                     auto_join: None,
                 },
@@ -182,6 +193,8 @@ impl RvConfig {
                     tls: false,
                     password: None,
                     identify_password: None,
+                    sasl_mechanism: None,
+                    proxy_url: None,
                     auto_connect: None,
                     auto_join: None,
                 },

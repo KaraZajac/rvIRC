@@ -53,8 +53,9 @@ fn nick_color(nick: &str) -> Color {
 /// Width in terminal cells of the input bar content (prompt + input + cursor if shown).
 fn input_content_width(app: &App, show_cursor: bool) -> usize {
     let prompt = if app.mode == Mode::Command { ":" } else { "" };
-    let before = &app.input[..app.input_cursor.min(app.input.len())];
-    let after = app.input.get(app.input_cursor..).unwrap_or("");
+    let cursor = app.input.floor_char_boundary(app.input_cursor.min(app.input.len()));
+    let before = &app.input[..cursor];
+    let after = app.input.get(cursor..).unwrap_or("");
     let cursor_cell = if show_cursor { 1 } else { 0 };
     prompt.width() + before.width() + cursor_cell + after.width()
 }
@@ -449,10 +450,12 @@ fn draw_input_bar(f: &mut Frame, area: Rect, app: &App) {
         let blink_on = (elapsed_ms / 530) % 2 == 0;
         let cursor_char = if blink_on { "|" } else { " " };
         let len = app.input.len();
-        let cur = app.input_cursor.min(len);
-        let (sel_lo, sel_hi) = app.input_selection
+        let cur = app.input.floor_char_boundary(app.input_cursor.min(len));
+        let (raw_sel_lo, raw_sel_hi) = app.input_selection
             .map(|(a, b)| (a.min(b).min(len), a.max(b).min(len)))
             .unwrap_or((cur, cur));
+        let sel_lo = app.input.floor_char_boundary(raw_sel_lo);
+        let sel_hi = app.input.floor_char_boundary(raw_sel_hi);
         let sel = Style::default().add_modifier(Modifier::REVERSED);
         let mut spans: Vec<Span> = vec![Span::raw(prompt)];
         if cur > 0 {

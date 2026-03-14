@@ -80,8 +80,9 @@ fn main() -> Result<(), String> {
                 match connect(server, &config, irc_tx.clone(), &rt) {
                     Ok((c, stream)) => {
                         let tx = irc_tx.clone();
+                        let our_nick = config.nickname.clone();
                         let handle = rt.spawn(async move {
-                            run_stream(stream, tx).await;
+                            run_stream(stream, tx, our_nick).await;
                         });
                         stream_handle = Some(handle);
                         client = Some(c);
@@ -90,11 +91,15 @@ fn main() -> Result<(), String> {
                         app.mark_target_read("*server*");
                         app.channel_index = 0;
                         app.status_message = format!("Auto-connecting to {}...", server.name);
-                        if let Some(ref pw) = server.identify_password {
-                            if let Some(ref c) = client {
-                                let _ = c.send_privmsg("NickServ", &format!("IDENTIFY {}", pw));
+                        if server.sasl_mechanism.is_none() {
+                            if let Some(ref pw) = server.identify_password {
+                                if let Some(ref c) = client {
+                                    let _ = c.send_privmsg("NickServ", &format!("IDENTIFY {}", pw));
+                                }
+                                app.auto_join_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+                            } else {
+                                app.auto_join_after = None;
                             }
-                            app.auto_join_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
                         } else {
                             app.auto_join_after = None;
                         }
@@ -208,6 +213,20 @@ fn main() -> Result<(), String> {
                 M::TransferComplete { .. } => {
                     app.transfer_progress_visible = false;
                 }
+                M::RequestChathistory { ref target } => {
+                    if let Some(ref c) = client {
+                        let _ = c.send(IrcCommand::Raw(
+                            "CHATHISTORY".to_string(),
+                            vec!["LATEST".to_string(), target.clone(), "*".to_string(), "50".to_string()],
+                        ));
+                    }
+                }
+                M::ChathistoryBatch { ref target, ref lines } => {
+                    let buf = app.messages.entry(target.clone()).or_default();
+                    for line in lines.iter().rev() {
+                        buf.insert(0, line.clone());
+                    }
+                }
                 _ => {}
             }
             let was_connected = matches!(&msg, M::Connected { .. });
@@ -267,7 +286,8 @@ fn main() -> Result<(), String> {
                     match connect(server, &config, irc_tx.clone(), &rt) {
                         Ok((c, stream)) => {
                             let tx = irc_tx.clone();
-                            let handle = rt.spawn(async move { run_stream(stream, tx).await });
+                            let our_nick = config.nickname.clone();
+                            let handle = rt.spawn(async move { run_stream(stream, tx, our_nick).await });
                             stream_handle = Some(handle);
                             client = Some(c);
                             app.current_nickname = config.nickname.clone();
@@ -275,12 +295,16 @@ fn main() -> Result<(), String> {
                             app.mark_target_read("*server*");
                             app.channel_index = 0;
                             app.clear_reconnect();
-                            if let Some(ref pw) = server.identify_password {
-                                if let Some(ref c) = client {
-                                    let _ = c.send_privmsg("NickServ", &format!("IDENTIFY {}", pw));
-                                    app.status_message = "Identifying with NickServ...".to_string();
+                            if server.sasl_mechanism.is_none() {
+                                if let Some(ref pw) = server.identify_password {
+                                    if let Some(ref c) = client {
+                                        let _ = c.send_privmsg("NickServ", &format!("IDENTIFY {}", pw));
+                                        app.status_message = "Identifying with NickServ...".to_string();
+                                    }
+                                    app.auto_join_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+                                } else {
+                                    app.auto_join_after = None;
                                 }
-                                app.auto_join_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
                             } else {
                                 app.auto_join_after = None;
                             }
@@ -559,6 +583,9 @@ fn apply_irc_message(
                 app.reconnect_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
                 app.reconnect_attempt = 1;
             }
+        }
+        M::RequestChathistory { .. } | M::ChathistoryBatch { .. } => {
+            // Handled in the outer match block before apply_irc_message
         }
     }
 }
@@ -972,8 +999,9 @@ fn handle_key_action(
                     match connect(server, config, irc_tx.clone(), rt) {
                         Ok((c, stream)) => {
                             let tx = irc_tx.clone();
+                            let our_nick = config.nickname.clone();
                             let handle = rt.spawn(async move {
-                                run_stream(stream, tx).await;
+                                run_stream(stream, tx, our_nick).await;
                             });
                             *stream_handle = Some(handle);
                             *client = Some(c);
@@ -981,16 +1009,20 @@ fn handle_key_action(
                             app.current_channel = Some("*server*".to_string());
                             app.mark_target_read("*server*");
                             app.channel_index = 0;
-                            if let Some(ref pw) = server.identify_password {
-                                if let Some(ref c) = client {
-                                    let _ = c.send_privmsg("NickServ", &format!("IDENTIFY {}", pw));
-                                    app.status_message = "Identifying with NickServ...".to_string();
+                            if server.sasl_mechanism.is_none() {
+                                if let Some(ref pw) = server.identify_password {
+                                    if let Some(ref c) = client {
+                                        let _ = c.send_privmsg("NickServ", &format!("IDENTIFY {}", pw));
+                                        app.status_message = "Identifying with NickServ...".to_string();
+                                    }
+                                    app.auto_join_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+                                } else {
+                                    app.auto_join_after = None;
                                 }
-                                app.auto_join_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
                             } else {
                                 app.auto_join_after = None;
-                                app.status_message = format!("Connected to {}.", name);
                             }
+                            app.status_message = format!("Connected to {}.", name);
                         }
                         Err(e) => {
                             app.status_message = e;
@@ -1135,14 +1167,15 @@ fn handle_key_action(
             if c != '\0' {
                 if app.mode == Mode::Insert || app.mode == Mode::Command {
                     if let Some((start, end)) = app.input_selection.take() {
-                        let (lo, hi) = (start.min(end), start.max(end));
+                        let lo = app.input.floor_char_boundary(start.min(end).min(app.input.len()));
+                        let hi = app.input.ceil_char_boundary(start.max(end).min(app.input.len()));
                         app.input.replace_range(lo..hi, &c.to_string());
-                        app.input_cursor = lo + 1;
+                        app.input_cursor = lo + c.len_utf8();
                     } else {
                         let len = app.input.len();
-                        app.input_cursor = app.input_cursor.min(len);
+                        app.input_cursor = app.input.floor_char_boundary(app.input_cursor.min(len));
                         app.input.insert(app.input_cursor, c);
-                        app.input_cursor += 1;
+                        app.input_cursor += c.len_utf8();
                     }
                     if app.mode == Mode::Insert {
                         send_typing_indicator(app, client, "active");
@@ -1153,7 +1186,8 @@ fn handle_key_action(
         Backspace => {
             if app.mode == Mode::Insert || app.mode == Mode::Command {
                 if let Some((start, end)) = app.input_selection.take() {
-                    let (lo, hi) = (start.min(end), start.max(end));
+                    let lo = app.input.floor_char_boundary(start.min(end).min(app.input.len()));
+                    let hi = app.input.ceil_char_boundary(start.max(end).min(app.input.len()));
                     app.input.replace_range(lo..hi, "");
                     app.input_cursor = lo;
                 } else {
@@ -1290,12 +1324,13 @@ fn handle_key_action(
         InputDelete => {
             if app.mode == Mode::Insert || app.mode == Mode::Command {
                 if let Some((start, end)) = app.input_selection.take() {
-                    let (lo, hi) = (start.min(end), start.max(end));
+                    let lo = app.input.floor_char_boundary(start.min(end).min(app.input.len()));
+                    let hi = app.input.ceil_char_boundary(start.max(end).min(app.input.len()));
                     app.input.replace_range(lo..hi, "");
                     app.input_cursor = lo;
                 } else {
                     let len = app.input.len();
-                    app.input_cursor = app.input_cursor.min(len);
+                    app.input_cursor = app.input.floor_char_boundary(app.input_cursor.min(len));
                     if app.input_cursor < len {
                         let next = input_next_char_boundary(&app.input, app.input_cursor);
                         app.input.replace_range(app.input_cursor..next, "");
@@ -1744,19 +1779,24 @@ fn run_command(
                     match connect(server, config, irc_tx.clone(), rt) {
                         Ok((c, stream)) => {
                             let tx = irc_tx.clone();
-                            let handle = rt.spawn(async move { run_stream(stream, tx).await });
+                            let our_nick = config.nickname.clone();
+                            let handle = rt.spawn(async move { run_stream(stream, tx, our_nick).await });
                             *stream_handle = Some(handle);
                             *client = Some(c);
                             app.current_nickname = config.nickname.clone();
                             app.current_channel = Some("*server*".to_string());
                             app.mark_target_read("*server*");
                             app.channel_index = 0;
-                            if let Some(ref pw) = server.identify_password {
-                                if let Some(ref c) = client {
-                                    let _ = c.send_privmsg("NickServ", &format!("IDENTIFY {}", pw));
-                                    app.status_message = "Identifying with NickServ...".to_string();
+                            if server.sasl_mechanism.is_none() {
+                                if let Some(ref pw) = server.identify_password {
+                                    if let Some(ref c) = client {
+                                        let _ = c.send_privmsg("NickServ", &format!("IDENTIFY {}", pw));
+                                        app.status_message = "Identifying with NickServ...".to_string();
+                                    }
+                                    app.auto_join_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+                                } else {
+                                    app.auto_join_after = None;
                                 }
-                                app.auto_join_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
                             } else {
                                 app.auto_join_after = None;
                             }
@@ -1785,8 +1825,9 @@ fn run_command(
                     match connect(server, config, irc_tx.clone(), rt) {
                         Ok((c, stream)) => {
                             let tx = irc_tx.clone();
+                            let our_nick = config.nickname.clone();
                             let handle = rt.spawn(async move {
-                                run_stream(stream, tx).await;
+                                run_stream(stream, tx, our_nick).await;
                             });
                             *stream_handle = Some(handle);
                             *client = Some(c);
@@ -1794,12 +1835,16 @@ fn run_command(
                             app.current_channel = Some("*server*".to_string());
                             app.mark_target_read("*server*");
                             app.channel_index = 0;
-                            if let Some(ref pw) = server.identify_password {
-                                if let Some(ref c) = client {
-                                    let _ = c.send_privmsg("NickServ", &format!("IDENTIFY {}", pw));
-                                    app.status_message = "Identifying with NickServ...".to_string();
+                            if server.sasl_mechanism.is_none() {
+                                if let Some(ref pw) = server.identify_password {
+                                    if let Some(ref c) = client {
+                                        let _ = c.send_privmsg("NickServ", &format!("IDENTIFY {}", pw));
+                                        app.status_message = "Identifying with NickServ...".to_string();
+                                    }
+                                    app.auto_join_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+                                } else {
+                                    app.auto_join_after = None;
                                 }
-                                app.auto_join_after = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
                             } else {
                                 app.auto_join_after = None;
                             }
