@@ -153,7 +153,7 @@ fn message_line(msg: &irc::proto::Message) -> Option<(String, MessageLine)> {
     let target = format_message_target(msg).unwrap_or_else(|| "*server*".to_string());
     Some((
         target,
-        MessageLine { source, text, kind, image_id: None },
+        MessageLine { source, text, kind, image_id: None, timestamp: None },
     ))
 }
 
@@ -389,6 +389,7 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx) {
                                         text: data,
                                         kind: MessageKind::Action,
                                         image_id: None,
+                                        timestamp: None,
                                     },
                                 });
                             } else if matches!(tag.as_str(), "VERSION" | "PING" | "TIME") {

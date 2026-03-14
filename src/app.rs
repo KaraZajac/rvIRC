@@ -38,6 +38,8 @@ pub struct MessageLine {
     pub text: String,
     pub kind: MessageKind,
     pub image_id: Option<usize>,
+    /// When the message was received (for display as nick | HH:mm).
+    pub timestamp: Option<chrono::DateTime<chrono::Local>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +85,8 @@ pub struct App {
     pub mode: Mode,
     pub input: String,
     pub input_cursor: usize,
+    /// Selection in input: (start, end) byte indices, start <= end. None means no selection.
+    pub input_selection: Option<(usize, usize)>,
 
     /// When the app was created; used for rainbow animation phase.
     pub created_at: Instant,
@@ -308,6 +312,7 @@ impl App {
             mode: Mode::Normal,
             input: String::new(),
             input_cursor: 0,
+            input_selection: None,
             channel_panel_visible: true,
             messages_panel_visible: true,
             channel_list: Vec::new(),
@@ -620,6 +625,7 @@ impl App {
                 text: text.to_string(),
                 kind: MessageKind::Other,
                 image_id: None,
+                timestamp: None,
             },
         );
     }
@@ -635,17 +641,22 @@ impl App {
         })
     }
 
-    pub fn push_message(&mut self, target: &str, line: MessageLine) {
+    pub fn push_message(&mut self, target: &str, mut line: MessageLine) {
+        let current = self.current_channel.as_deref().unwrap_or("");
+        let mention = self
+            .current_nickname
+            .as_deref()
+            .map_or(false, |nick| !nick.is_empty() && line.text.to_lowercase().contains(&nick.to_lowercase()));
+        let highlight = self.highlight_matches(&line.text);
+        if line.timestamp.is_none() {
+            line.timestamp = Some(chrono::Local::now());
+        }
         self.messages
             .entry(target.to_string())
             .or_default()
-            .push(line.clone());
-        let current = self.current_channel.as_deref().unwrap_or("");
+            .push(line);
         if target != current {
             self.unread_targets.insert(target.to_string());
-            let nick = self.current_nickname.as_deref().unwrap_or("");
-            let mention = !nick.is_empty() && line.text.to_lowercase().contains(&nick.to_lowercase());
-            let highlight = self.highlight_matches(&line.text);
             if mention || highlight {
                 self.unread_mentions.insert(target.to_string());
             }

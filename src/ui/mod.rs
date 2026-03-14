@@ -2,7 +2,7 @@
 
 mod layout;
 
-use crate::app::{App, MessageKind, MessageLine, Mode, PanelFocus, UserAction};
+use crate::app::{App, MessageLine, Mode, PanelFocus, UserAction};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -13,6 +13,42 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const CHANNELS_PANE_WIDTH: u16 = 22;
 const USERS_PANE_WIDTH: u16 = 18;
+
+/// Deterministic color for a nick (same nick → same color). Uses a hash of the nick.
+/// Color for message source (nick or ***). System sources use dim gray.
+fn source_color(source: &str) -> Color {
+    if source == "***" || source.is_empty() {
+        Color::DarkGray
+    } else {
+        nick_color(source)
+    }
+}
+
+fn nick_color(nick: &str) -> Color {
+    const PALETTE: [Color; 16] = [
+        Color::Red,
+        Color::Green,
+        Color::Yellow,
+        Color::Blue,
+        Color::Magenta,
+        Color::Cyan,
+        Color::LightRed,
+        Color::LightGreen,
+        Color::LightYellow,
+        Color::LightBlue,
+        Color::LightMagenta,
+        Color::LightCyan,
+        Color::Rgb(255, 165, 0),   // orange
+        Color::Rgb(147, 112, 219), // medium purple
+        Color::Rgb(0, 206, 209),   // dark turquoise
+        Color::Rgb(255, 105, 180), // hot pink
+    ];
+    let mut h: u64 = 0;
+    for b in nick.bytes() {
+        h = h.wrapping_mul(31).wrapping_add(b as u64);
+    }
+    PALETTE[(h as usize) % PALETTE.len()]
+}
 
 /// Width in terminal cells of the input bar content (prompt + input + cursor if shown).
 fn input_content_width(app: &App, show_cursor: bool) -> usize {
@@ -169,23 +205,14 @@ fn wrap_str_at_width(s: &str, max_width: usize) -> Vec<String> {
 
 pub fn message_wrapped_height(m: &MessageLine, _current_nick: Option<&str>, width: u16) -> u16 {
     if width == 0 {
-        return 1;
+        return 2; // header + at least 1 message line
     }
-    let prefix = match m.kind {
-        MessageKind::Privmsg => format!("<{}> ", m.source),
-        MessageKind::Notice => format!("[{}] ", m.source),
-        MessageKind::Action => format!("* {} ", m.source),
-        MessageKind::Join => format!("*** {} ", m.source),
-        MessageKind::Part | MessageKind::Quit => format!("*** {} ", m.source),
-        MessageKind::Nick => format!("*** {} ", m.source),
-        MessageKind::Mode => "*** ".to_string(),
-        MessageKind::Other => format!("{} ", m.source),
-    };
+    // Header: "nick | HH:mm" = 1 line. Message wraps below.
     let stripped = crate::format::strip_for_display_width(&m.text);
-    let full = format!("{}{}", prefix, stripped);
     let w = width as usize;
-    let display_width = full.width();
-    ((display_width + w - 1) / w).max(1) as u16
+    let msg_width = stripped.width();
+    let msg_lines = ((msg_width + w - 1) / w).max(1);
+    1 + msg_lines as u16
 }
 
 fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
@@ -370,8 +397,8 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-/// Format a message line with styling, pre-wrapped at character boundaries so long words/URLs wrap.
-/// Parses IRC formatting codes (bold, italic, color, etc.) for display.
+/// Format a message line: header "nick | HH:mm" then message on following lines.
+/// Nick gets a deterministic color. Parses IRC formatting (bold, italic, etc.) for the message.
 fn format_message_line_wrapped(
     m: &MessageLine,
     current_nick: Option<&str>,
@@ -379,35 +406,36 @@ fn format_message_line_wrapped(
     width: u16,
     elapsed_ms: u64,
 ) -> Text<'static> {
+    let time_str = m
+        .timestamp
+        .as_ref()
+        .map(|t| t.format("%H:%M").to_string())
+        .unwrap_or_else(|| "--:--".to_string());
+    let header_style = source_color(&m.source);
     let mention = current_nick.map_or(false, |nick| {
         !nick.is_empty() && m.text.to_lowercase().contains(&nick.to_lowercase())
     });
-    let (prefix, prefix_style) = match m.kind {
-        MessageKind::Privmsg => (
-            format!("<{}> ", m.source),
-            if mention {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            },
-        ),
-        MessageKind::Notice => (format!("[{}] ", m.source), Style::default().add_modifier(Modifier::ITALIC)),
-        MessageKind::Action => (format!("* {} ", m.source), Style::default().fg(Color::Magenta)),
-        MessageKind::Join => (format!("*** {} ", m.source), Style::default().fg(Color::Cyan)),
-        MessageKind::Part | MessageKind::Quit => (format!("*** {} ", m.source), Style::default().fg(Color::Yellow)),
-        MessageKind::Nick => (format!("*** {} ", m.source), Style::default().fg(Color::Magenta)),
-        MessageKind::Mode => (format!("*** "), Style::default().fg(Color::Green)),
-        MessageKind::Other => (format!("{} ", m.source), Style::default()),
-    };
-    let prefix_span = Span::styled(prefix.clone(), prefix_style);
-    // @@...@@ = rvIRC rainbow (animated); other text via format_outgoing + parse_irc_formatting
+    let header_line = Line::from(vec![
+        Span::styled(m.source.clone(), header_style),
+        Span::raw(" | "),
+        Span::styled(time_str, Style::default().add_modifier(Modifier::DIM)),
+    ]);
+    // Message body: IRC formatting, highlights, rainbow, etc.
     let mut msg_spans = crate::format::parse_message_with_rainbow(&m.text, elapsed_ms);
-    msg_spans = crate::format::apply_highlights_to_spans(msg_spans, highlight_words);
-    let mut all_spans = vec![prefix_span];
-    all_spans.extend(msg_spans);
+    let mut highlight_words = highlight_words.to_vec();
+    if mention {
+        if let Some(nick) = current_nick {
+            highlight_words.push(nick.to_string());
+        }
+    }
+    msg_spans = crate::format::apply_highlights_to_spans(msg_spans, &highlight_words);
     let w = width as usize;
-    let lines = crate::format::wrap_spans(&all_spans, w);
-    Text::from(lines)
+    let msg_lines = crate::format::wrap_spans(&msg_spans, w);
+    let mut all_lines = vec![header_line];
+    for line in msg_lines {
+        all_lines.push(line);
+    }
+    Text::from(all_lines)
 }
 
 fn draw_input_bar(f: &mut Frame, area: Rect, app: &App) {
@@ -417,13 +445,44 @@ fn draw_input_bar(f: &mut Frame, area: Rect, app: &App) {
     };
     let show_cursor = app.mode == Mode::Insert || app.mode == Mode::Command;
     let line = if show_cursor {
-        let before = format!("{}{}", prompt, &app.input[..app.input_cursor.min(app.input.len())]);
-        let after = app.input.get(app.input_cursor..).unwrap_or("");
-        Line::from(vec![
-            Span::raw(before),
-            Span::styled("|", Style::default()),
-            Span::raw(after),
-        ])
+        let elapsed_ms = std::time::Instant::now().duration_since(app.created_at).as_millis();
+        let blink_on = (elapsed_ms / 530) % 2 == 0;
+        let cursor_char = if blink_on { "|" } else { " " };
+        let len = app.input.len();
+        let cur = app.input_cursor.min(len);
+        let (sel_lo, sel_hi) = app.input_selection
+            .map(|(a, b)| (a.min(b).min(len), a.max(b).min(len)))
+            .unwrap_or((cur, cur));
+        let sel = Style::default().add_modifier(Modifier::REVERSED);
+        let mut spans: Vec<Span> = vec![Span::raw(prompt)];
+        if cur > 0 {
+            if cur <= sel_lo {
+                spans.push(Span::raw(&app.input[0..cur]));
+            } else {
+                if sel_lo > 0 {
+                    spans.push(Span::raw(&app.input[0..sel_lo]));
+                }
+                spans.push(Span::styled(&app.input[sel_lo..cur], sel));
+            }
+        }
+        spans.push(Span::styled(cursor_char, Style::default()));
+        if cur < len {
+            if sel_hi <= cur {
+                spans.push(Span::raw(&app.input[cur..len]));
+            } else if cur < sel_lo {
+                spans.push(Span::raw(&app.input[cur..sel_lo]));
+                spans.push(Span::styled(&app.input[sel_lo..sel_hi.min(len)], sel));
+                if sel_hi < len {
+                    spans.push(Span::raw(&app.input[sel_hi..len]));
+                }
+            } else {
+                spans.push(Span::styled(&app.input[cur..sel_hi.min(len)], sel));
+                if sel_hi < len {
+                    spans.push(Span::raw(&app.input[sel_hi..len]));
+                }
+            }
+        }
+        Line::from(spans)
     } else {
         Line::from(format!("{}{}", prompt, app.input))
     };

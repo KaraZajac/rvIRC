@@ -1,6 +1,36 @@
 //! IRC message formatting: user-friendly input ↔ IRC control codes.
 //! See https://modern.ircdocs.horse/formatting
 
+// IRC line limit is 512 bytes; reserve ~50 for "PRIVMSG target :\r\n"
+pub const MAX_MESSAGE_BYTES: usize = 460;
+
+// For encrypted messages: [:rvIRC:ENC:nonce:ciphertext] adds ~30 + base64 overhead.
+// ChaCha20-Poly1305: ciphertext = plaintext + 16. Base64 expands 4/3. Use ~300 bytes plaintext.
+pub const MAX_ENCRYPTED_PLAINTEXT_BYTES: usize = 300;
+
+/// Split text into chunks that fit within IRC message limits, at UTF-8 boundaries.
+/// Returns the original string as sole chunk if it fits; otherwise multiple chunks.
+pub fn split_message_for_irc(text: &str, max_bytes: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut remaining = text;
+    while !remaining.is_empty() {
+        if remaining.len() <= max_bytes {
+            chunks.push(remaining.to_string());
+            break;
+        }
+        let mut i = max_bytes.min(remaining.len());
+        while i > 0 && !remaining.is_char_boundary(i) {
+            i -= 1;
+        }
+        if i == 0 {
+            i = 1;
+        }
+        chunks.push(remaining[..i].to_string());
+        remaining = &remaining[i..];
+    }
+    chunks
+}
+
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use std::collections::HashMap;

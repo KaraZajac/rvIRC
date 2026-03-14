@@ -141,20 +141,30 @@ fn main() -> Result<(), String> {
                 }
                 M::SendPrivmsg { ref target, ref text } => {
                     if let Some(ref c) = client {
-                        let _ = c.send_privmsg(target, text);
+                        for chunk in format::split_message_for_irc(text, format::MAX_MESSAGE_BYTES) {
+                            let _ = c.send_privmsg(target, &chunk);
+                        }
                     }
                 }
                 M::SendPrivmsgOrEncrypt { ref target, ref text } => {
                     if let Some(ref c) = client {
-                        let wire = if let Some(session) = app.secure_sessions.get_mut(target) {
-                            match session.encrypt(text) {
-                                Ok((nonce, ct)) => format!("[:rvIRC:ENC:{}:{}]", nonce, ct),
-                                Err(_) => text.clone(),
+                        if let Some(session) = app.secure_sessions.get_mut(target) {
+                            for chunk in format::split_message_for_irc(text, format::MAX_ENCRYPTED_PLAINTEXT_BYTES) {
+                                match session.encrypt(&chunk) {
+                                    Ok((nonce, ct)) => {
+                                        let wire = format!("[:rvIRC:ENC:{}:{}]", nonce, ct);
+                                        let _ = c.send_privmsg(target, &wire);
+                                    }
+                                    Err(_) => {
+                                        let _ = c.send_privmsg(target, &chunk);
+                                    }
+                                }
                             }
                         } else {
-                            text.clone()
-                        };
-                        let _ = c.send_privmsg(target, &wire);
+                            for chunk in format::split_message_for_irc(text, format::MAX_MESSAGE_BYTES) {
+                                let _ = c.send_privmsg(target, &chunk);
+                            }
+                        }
                     }
                 }
                 M::Status(ref s) => {
@@ -168,6 +178,7 @@ fn main() -> Result<(), String> {
                             text: text.clone(),
                             kind: MessageKind::Other,
                             image_id: None,
+                            timestamp: None,
                         },
                     );
                 }
@@ -552,6 +563,27 @@ fn apply_irc_message(
     }
 }
 
+/// Previous character boundary (for cursor left). Returns 0 if already at start.
+fn input_prev_char_boundary(s: &str, i: usize) -> usize {
+    if i == 0 {
+        return 0;
+    }
+    let mut j = i - 1;
+    while j > 0 && !s.is_char_boundary(j) {
+        j -= 1;
+    }
+    j
+}
+
+/// Next character boundary (for cursor right). Returns s.len() if already at end.
+fn input_next_char_boundary(s: &str, i: usize) -> usize {
+    if i >= s.len() {
+        return s.len();
+    }
+    let next_char_len = s[i..].chars().next().map_or(0, |c| c.len_utf8());
+    i + next_char_len
+}
+
 fn handle_key_action(
     app: &mut App,
     config: &RvConfig,
@@ -570,6 +602,7 @@ fn handle_key_action(
             if mode == Mode::Command {
                 app.input = String::new();
                 app.input_cursor = 0;
+                app.input_selection = None;
             }
         }
         FocusChannels => {
@@ -691,6 +724,8 @@ fn handle_key_action(
                         app.user_action_menu = false;
                         app.mode = Mode::Command;
                         app.input = format!("msg {} ", nick);
+                        app.input_cursor = app.input.len();
+                        app.input_selection = None;
                     }
                     UserAction::Whois => {
                         app.user_action_menu = false;
@@ -1099,8 +1134,16 @@ fn handle_key_action(
         Char(c) => {
             if c != '\0' {
                 if app.mode == Mode::Insert || app.mode == Mode::Command {
-                    app.input.push(c);
-                    app.input_cursor = app.input.len();
+                    if let Some((start, end)) = app.input_selection.take() {
+                        let (lo, hi) = (start.min(end), start.max(end));
+                        app.input.replace_range(lo..hi, &c.to_string());
+                        app.input_cursor = lo + 1;
+                    } else {
+                        let len = app.input.len();
+                        app.input_cursor = app.input_cursor.min(len);
+                        app.input.insert(app.input_cursor, c);
+                        app.input_cursor += 1;
+                    }
                     if app.mode == Mode::Insert {
                         send_typing_indicator(app, client, "active");
                     }
@@ -1109,11 +1152,18 @@ fn handle_key_action(
         }
         Backspace => {
             if app.mode == Mode::Insert || app.mode == Mode::Command {
-                let len = app.input.len();
-                app.input_cursor = app.input_cursor.min(len);
-                if app.input_cursor > 0 {
-                    app.input.remove(app.input_cursor - 1);
-                    app.input_cursor -= 1;
+                if let Some((start, end)) = app.input_selection.take() {
+                    let (lo, hi) = (start.min(end), start.max(end));
+                    app.input.replace_range(lo..hi, "");
+                    app.input_cursor = lo;
+                } else {
+                    let len = app.input.len();
+                    app.input_cursor = app.input_cursor.min(len);
+                    if app.input_cursor > 0 {
+                        let prev = input_prev_char_boundary(&app.input, app.input_cursor);
+                        app.input.replace_range(prev..app.input_cursor, "");
+                        app.input_cursor = prev;
+                    }
                 }
             }
         }
@@ -1127,6 +1177,7 @@ fn handle_key_action(
                     let idx = app.input_history_index - 1;
                     app.input = app.input_history[idx].clone();
                     app.input_cursor = app.input.len();
+                    app.input_selection = None;
                 }
             }
         }
@@ -1139,11 +1190,117 @@ fn handle_key_action(
                     app.input = app.input_history[app.input_history_index - 1].clone();
                 }
                 app.input_cursor = app.input.len();
+                app.input_selection = None;
             }
         }
         TabComplete => {
             if app.mode == Mode::Insert || app.mode == Mode::Command {
+                app.input_selection = None;
                 complete_input(app);
+            }
+        }
+        InputCursorLeft => {
+            if app.mode == Mode::Insert || app.mode == Mode::Command {
+                app.input_selection = None;
+                app.input_cursor = input_prev_char_boundary(&app.input, app.input_cursor);
+            }
+        }
+        InputCursorRight => {
+            if app.mode == Mode::Insert || app.mode == Mode::Command {
+                app.input_selection = None;
+                app.input_cursor = input_next_char_boundary(&app.input, app.input_cursor);
+            }
+        }
+        InputCursorHome => {
+            if app.mode == Mode::Insert || app.mode == Mode::Command {
+                app.input_selection = None;
+                app.input_cursor = 0;
+            }
+        }
+        InputCursorEnd => {
+            if app.mode == Mode::Insert || app.mode == Mode::Command {
+                app.input_selection = None;
+                app.input_cursor = app.input.len();
+            }
+        }
+        InputSelectLeft => {
+            if app.mode == Mode::Insert || app.mode == Mode::Command {
+                let new_cursor = input_prev_char_boundary(&app.input, app.input_cursor);
+                let (start, end) = app.input_selection
+                    .map(|(s, e)| (s.min(e), s.max(e)))
+                    .unwrap_or((app.input_cursor, app.input_cursor));
+                let anchor = if (start, end) == (app.input_cursor, app.input_cursor) {
+                    app.input_cursor
+                } else if app.input_cursor == end {
+                    start
+                } else {
+                    end
+                };
+                app.input_cursor = new_cursor;
+                let (lo, hi) = (new_cursor.min(anchor), new_cursor.max(anchor));
+                app.input_selection = if lo != hi { Some((lo, hi)) } else { None };
+            }
+        }
+        InputSelectRight => {
+            if app.mode == Mode::Insert || app.mode == Mode::Command {
+                let new_cursor = input_next_char_boundary(&app.input, app.input_cursor);
+                let (start, end) = app.input_selection
+                    .map(|(s, e)| (s.min(e), s.max(e)))
+                    .unwrap_or((app.input_cursor, app.input_cursor));
+                let anchor = if (start, end) == (app.input_cursor, app.input_cursor) {
+                    app.input_cursor
+                } else if app.input_cursor == start {
+                    end
+                } else {
+                    start
+                };
+                app.input_cursor = new_cursor;
+                let (lo, hi) = (new_cursor.min(anchor), new_cursor.max(anchor));
+                app.input_selection = if lo != hi { Some((lo, hi)) } else { None };
+            }
+        }
+        InputSelectHome => {
+            if app.mode == Mode::Insert || app.mode == Mode::Command {
+                let new_cursor = 0;
+                let (start, end) = app.input_selection
+                    .map(|(s, e)| (s.min(e), s.max(e)))
+                    .unwrap_or((app.input_cursor, app.input_cursor));
+                let anchor = if (start, end) == (app.input_cursor, app.input_cursor) {
+                    app.input_cursor
+                } else if app.input_cursor == end { start } else { end };
+                app.input_cursor = new_cursor;
+                let (lo, hi) = (new_cursor.min(anchor), new_cursor.max(anchor));
+                app.input_selection = if lo != hi { Some((lo, hi)) } else { None };
+            }
+        }
+        InputSelectEnd => {
+            if app.mode == Mode::Insert || app.mode == Mode::Command {
+                let new_cursor = app.input.len();
+                let (start, end) = app.input_selection
+                    .map(|(s, e)| (s.min(e), s.max(e)))
+                    .unwrap_or((app.input_cursor, app.input_cursor));
+                let anchor = if (start, end) == (app.input_cursor, app.input_cursor) {
+                    app.input_cursor
+                } else if app.input_cursor == start { end } else { start };
+                app.input_cursor = new_cursor;
+                let (lo, hi) = (new_cursor.min(anchor), new_cursor.max(anchor));
+                app.input_selection = if lo != hi { Some((lo, hi)) } else { None };
+            }
+        }
+        InputDelete => {
+            if app.mode == Mode::Insert || app.mode == Mode::Command {
+                if let Some((start, end)) = app.input_selection.take() {
+                    let (lo, hi) = (start.min(end), start.max(end));
+                    app.input.replace_range(lo..hi, "");
+                    app.input_cursor = lo;
+                } else {
+                    let len = app.input.len();
+                    app.input_cursor = app.input_cursor.min(len);
+                    if app.input_cursor < len {
+                        let next = input_next_char_boundary(&app.input, app.input_cursor);
+                        app.input.replace_range(app.input_cursor..next, "");
+                    }
+                }
             }
         }
         Enter => {
@@ -1159,6 +1316,7 @@ fn handle_key_action(
                 }
                 app.input.clear();
                 app.input_cursor = 0;
+                app.input_selection = None;
                 if text.starts_with(':') {
                     if run_command(app, client, stream_handle, config, irc_tx, rt, &text)? {
                         return Ok(true);
@@ -1172,23 +1330,32 @@ fn handle_key_action(
                         let formatted = format::format_outgoing(&text);
                         if app.secure_sessions.contains_key(&target) {
                             let session = app.secure_sessions.get_mut(&target).unwrap();
-                            match session.encrypt(&formatted) {
-                                Ok((nonce, ct)) => {
-                                    let wire = format!("[:rvIRC:ENC:{}:{}]", nonce, ct);
-                                    c.send_privmsg(&target, &wire).map_err(|e| e.to_string())?;
-                                    if app.away_message.is_some() {
-                                        let _ = c.send(IrcCommand::AWAY(None));
-                                        app.away_message = None;
-                                        app.status_message = "Auto-unaway.".to_string();
+                            let mut ok = true;
+                            for chunk in format::split_message_for_irc(&formatted, format::MAX_ENCRYPTED_PLAINTEXT_BYTES) {
+                                match session.encrypt(&chunk) {
+                                    Ok((nonce, ct)) => {
+                                        let wire = format!("[:rvIRC:ENC:{}:{}]", nonce, ct);
+                                        c.send_privmsg(&target, &wire).map_err(|e| e.to_string())?;
                                     }
-                                    push_self_message(app, &target, formatted, irc_tx, rt);
-                                }
-                                Err(e) => {
-                                    app.status_message = format!("Encrypt error: {}", e);
+                                    Err(e) => {
+                                        app.status_message = format!("Encrypt error: {}", e);
+                                        ok = false;
+                                        break;
+                                    }
                                 }
                             }
+                            if ok {
+                                if app.away_message.is_some() {
+                                    let _ = c.send(IrcCommand::AWAY(None));
+                                    app.away_message = None;
+                                    app.status_message = "Auto-unaway.".to_string();
+                                }
+                                push_self_message(app, &target, formatted, irc_tx, rt);
+                            }
                         } else {
-                            c.send_privmsg(&target, &formatted).map_err(|e| e.to_string())?;
+                            for chunk in format::split_message_for_irc(&formatted, format::MAX_MESSAGE_BYTES) {
+                                c.send_privmsg(&target, &chunk).map_err(|e| e.to_string())?;
+                            }
                             if app.away_message.is_some() {
                                 let _ = c.send(IrcCommand::AWAY(None));
                                 app.away_message = None;
@@ -1211,6 +1378,8 @@ fn handle_key_action(
                     }
                 }
                 app.input.clear();
+                app.input_cursor = 0;
+                app.input_selection = None;
                 app.mode = Mode::Normal;
                 if run_command(app, client, stream_handle, config, irc_tx, rt, &line)? {
                     return Ok(true);
@@ -1435,6 +1604,7 @@ fn handle_key_action(
             app.mode = Mode::Normal;
             app.input.clear();
             app.input_cursor = 0;
+            app.input_selection = None;
             app.user_action_menu = false;
             app.panel_focus = PanelFocus::Main;
         }
@@ -1707,18 +1877,27 @@ fn run_command(
                     let formatted = format::format_outgoing(&text);
                     if app.secure_sessions.contains_key(&nick) {
                         let session = app.secure_sessions.get_mut(&nick).unwrap();
-                        match session.encrypt(&formatted) {
-                            Ok((nonce, ct)) => {
-                                let wire = format!("[:rvIRC:ENC:{}:{}]", nonce, ct);
-                                c.send_privmsg(&nick, &wire).map_err(|e| e.to_string())?;
-                                push_self_message(app, &nick, formatted, irc_tx, rt);
-                            }
-                            Err(e) => {
-                                app.status_message = format!("Encrypt error: {}", e);
+                        let mut ok = true;
+                        for chunk in format::split_message_for_irc(&formatted, format::MAX_ENCRYPTED_PLAINTEXT_BYTES) {
+                            match session.encrypt(&chunk) {
+                                Ok((nonce, ct)) => {
+                                    let wire = format!("[:rvIRC:ENC:{}:{}]", nonce, ct);
+                                    c.send_privmsg(&nick, &wire).map_err(|e| e.to_string())?;
+                                }
+                                Err(e) => {
+                                    app.status_message = format!("Encrypt error: {}", e);
+                                    ok = false;
+                                    break;
+                                }
                             }
                         }
+                        if ok {
+                            push_self_message(app, &nick, formatted, irc_tx, rt);
+                        }
                     } else {
-                        c.send_privmsg(&nick, &formatted).map_err(|e| e.to_string())?;
+                        for chunk in format::split_message_for_irc(&formatted, format::MAX_MESSAGE_BYTES) {
+                            c.send_privmsg(&nick, &chunk).map_err(|e| e.to_string())?;
+                        }
                         push_self_message(app, &nick, formatted, irc_tx, rt);
                     }
                 }
@@ -2047,7 +2226,9 @@ fn run_command(
         }
         R::SendPrivmsg { target, text } => {
             if let Some(ref c) = client {
-                c.send_privmsg(&target, &text).map_err(|e| e.to_string())?;
+                for chunk in format::split_message_for_irc(&text, format::MAX_MESSAGE_BYTES) {
+                    c.send_privmsg(&target, &chunk).map_err(|e| e.to_string())?;
+                }
             }
         }
         R::NoOp => {}
@@ -2274,7 +2455,7 @@ fn push_self_message(
     rt: &tokio::runtime::Runtime,
 ) {
     let nick = app.current_nickname.clone().unwrap_or_else(|| "?".to_string());
-    let mut line = MessageLine { source: nick, text, kind: MessageKind::Privmsg, image_id: None };
+    let mut line = MessageLine { source: nick, text, kind: MessageKind::Privmsg, image_id: None, timestamp: None };
     if app.render_images {
         if let Some(url) = extract_image_url(&line.text) {
             line.image_id = Some(app.next_image_id);
@@ -2624,6 +2805,7 @@ fn process_protocol_events(
                                 text: plaintext,
                                 kind: MessageKind::Privmsg,
                                 image_id: None,
+                                timestamp: None,
                             };
                             if app.render_images {
                                 if let Some(url) = extract_image_url(&line.text) {
@@ -2643,6 +2825,7 @@ fn process_protocol_events(
                                     text: format!("[decrypt error: {}]", e),
                                     kind: MessageKind::Other,
                                     image_id: None,
+                                    timestamp: None,
                                 },
                             );
                         }
@@ -2681,6 +2864,7 @@ fn process_protocol_events(
                             text: "[encrypted message, no secure session]".to_string(),
                             kind: MessageKind::Other,
                             image_id: None,
+                            timestamp: None,
                         },
                     );
                 }
