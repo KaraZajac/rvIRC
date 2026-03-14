@@ -550,7 +550,11 @@ fn draw_channels_pane(f: &mut Frame, area: Rect, app: &App) {
             let key = msg_key(s, t);
             let secure = app.secure_sessions.contains_key(&key);
             let prefix = if show_selector && i == app.channel_index {
-                "> "
+                if t == "*server*" {
+                    "> "
+                } else {
+                    ">   "  // same width as "    " so channel name doesn't shift
+                }
             } else if t == "*server*" {
                 "  "
             } else {
@@ -563,20 +567,24 @@ fn draw_channels_pane(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 Style::default()
             };
+            let prefix_style = Style::default();  // selector stays white
             if secure {
                 let verified = app.known_keys.is_verified(t, s);
                 let mut spans = vec![
-                    Span::styled(prefix, style),
+                    Span::styled(prefix, prefix_style),
                     Span::styled("\u{1F512}", Style::default().fg(Color::Green)),
                 ];
                 if verified {
                     spans.push(Span::styled("\u{2714}", Style::default().fg(Color::Green)));
                 }
                 spans.push(Span::styled(format!("{}  ", label), style));
-                let line = Line::from(spans);
-                ListItem::new(line)
+                ListItem::new(Line::from(spans))
             } else {
-                ListItem::new(Line::from(Span::styled(format!("{}{}  ", prefix, label), style)))
+                let line = Line::from(vec![
+                    Span::styled(prefix, prefix_style),
+                    Span::styled(format!("{}  ", label), style),
+                ]);
+                ListItem::new(line)
             }
         })
         .collect();
@@ -608,10 +616,11 @@ fn draw_messages_pane(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 Style::default()
             };
+            let prefix_style = Style::default();  // selector stays white
             if secure {
                 let verified = app.known_keys.is_verified(nick, s);
                 let mut spans = vec![
-                    Span::styled(prefix, style),
+                    Span::styled(prefix, prefix_style),
                     Span::styled("\u{1F512}", Style::default().fg(Color::Green)),
                 ];
                 if verified {
@@ -620,7 +629,11 @@ fn draw_messages_pane(f: &mut Frame, area: Rect, app: &App) {
                 spans.push(Span::styled(format!("{}  ", nick), style));
                 ListItem::new(Line::from(spans))
             } else {
-                ListItem::new(Line::from(Span::styled(format!("{}{}  ", prefix, nick), style)))
+                let line = Line::from(vec![
+                    Span::styled(prefix, prefix_style),
+                    Span::styled(format!("{}  ", nick), style),
+                ]);
+                ListItem::new(line)
             }
         })
         .collect();

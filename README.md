@@ -20,7 +20,8 @@
 | **Auto-reconnect** | After unexpected disconnect, retries up to 3 times (5s, 15s, 30s). Manual `:connect` or `:quit` cancels |
 | **Encrypted DMs** | End-to-end encrypted DM via `:secure`. X25519 + ChaCha20-Poly1305, directional keys, TOFU, SAS verification. Lock icon and checkmark in channel list |
 | **File transfer** | Send files via `:sendfile` using [magic-wormhole](https://crates.io/crates/magic-wormhole). Accept/reject popup; in-chat progress |
-| **Message area** | Wrap, auto-scroll, k/j or Page Up/Down for history. Inline images via [ratatui-image](https://crates.io/crates/ratatui-image) (Sixel, Kitty, iTerm2). Animated GIFs in channels, DMs, encrypted DMs |
+| **Message area** | Wrap, auto-scroll, k/j or Page Up/Down for history |
+| **Images in terminal** | Inline display of image links in chat via [ratatui-image](https://crates.io/crates/ratatui-image) (Sixel, Kitty, iTerm2). Animated GIFs in channels, DMs, encrypted DMs |
 | **Notifications** | Desktop notifications and optional sound for unviewed buffers. Config `notifications` and `sounds`; `:notifications on|off` and `:mute` / `:unmute` |
 | **IRC formatting** | Bold, italic, strikethrough, colors. `*italic*`, `**bold**`, `~~strikethrough~~`, `||spoiler||`, `:colorname:` — compatible with [IRC format codes](https://modern.ircdocs.horse/formatting) |
 | **rvIRC effects** | `@@text@@` = animated rainbow; `$$text$$` = scared (flicker) — sent as literal text, only rvIRC renders |
