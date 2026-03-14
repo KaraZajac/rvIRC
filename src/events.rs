@@ -23,6 +23,7 @@ pub fn handle_key(
     file_receive_popup_visible: bool,
     file_browser_visible: bool,
     secure_accept_popup_visible: bool,
+    highlight_popup_visible: bool,
 ) -> Option<KeyAction> {
     let key = match event {
         Event::Key(k) => k,
@@ -55,6 +56,9 @@ pub fn handle_key(
     }
     if server_list_popup_visible {
         return Some(handle_server_list_popup(key));
+    }
+    if highlight_popup_visible {
+        return Some(handle_highlight_popup(key));
     }
     if user_action_menu {
         return Some(handle_user_action_menu(key));
@@ -153,6 +157,13 @@ pub enum KeyAction {
     FileBrowserBack,
     FileBrowserSelect,
     FileBrowserClose,
+    HighlightPopupUp,
+    HighlightPopupDown,
+    HighlightPopupAdd,
+    HighlightPopupRemove,
+    HighlightPopupClose,
+    HighlightPopupInputChar(char),
+    HighlightPopupBackspace,
 }
 
 fn handle_normal(key: KeyEvent, panel_focus: PanelFocus) -> Option<KeyAction> {
@@ -337,6 +348,20 @@ fn handle_list_popup(key: KeyEvent, scroll_mode: bool) -> KeyAction {
             (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => KeyAction::ListPopupFilterChar(c),
             _ => KeyAction::NoOp,
         }
+    }
+}
+
+fn handle_highlight_popup(key: KeyEvent) -> KeyAction {
+    use crossterm::event::KeyModifiers;
+    match (key.code, key.modifiers) {
+        (KeyCode::Esc, _) => KeyAction::HighlightPopupClose,
+        (KeyCode::Enter, _) => KeyAction::HighlightPopupAdd,
+        (KeyCode::Up, _) | (KeyCode::Char('k'), _) => KeyAction::HighlightPopupUp,
+        (KeyCode::Down, _) | (KeyCode::Char('j'), _) => KeyAction::HighlightPopupDown,
+        (KeyCode::Char('d'), KeyModifiers::NONE) | (KeyCode::Char('D'), _) => KeyAction::HighlightPopupRemove,
+        (KeyCode::Backspace, _) => KeyAction::HighlightPopupBackspace,
+        (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => KeyAction::HighlightPopupInputChar(c),
+        _ => KeyAction::NoOp,
     }
 }
 

@@ -99,6 +99,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.search_popup_visible {
         draw_search_popup(f, area, app);
     }
+    if app.highlight_popup_visible {
+        draw_highlight_popup(f, area, app);
+    }
     if app.channel_list_popup_visible {
         draw_channel_list_popup(f, area, app);
     }
@@ -316,7 +319,7 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
         let elapsed_ms = std::time::Instant::now().duration_since(app.created_at).as_millis() as u64;
         let text_h = message_wrapped_height(m, nick.as_deref(), inner.width);
         let avail_text_h = text_h.min(max_y.saturating_sub(cur_y));
-        let content = format_message_line_wrapped(m, nick.as_deref(), inner.width, elapsed_ms);
+        let content = format_message_line_wrapped(m, nick.as_deref(), &app.highlight_words, inner.width, elapsed_ms);
         let text_rect = Rect { x: inner.x, y: cur_y, width: inner.width, height: avail_text_h };
         f.render_widget(
             Paragraph::new(content).wrap(Wrap { trim: true }),
@@ -346,6 +349,20 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
             }
         }
     }
+
+    // IRCv3 typing indicator at bottom of message area
+    let typing_nicks = app.typing_nicks_for_target(&target_key);
+    if !typing_nicks.is_empty() && cur_y < max_y {
+        let msg = match typing_nicks.len() {
+            1 => format!("{} is typing...", typing_nicks[0]),
+            2 => format!("{} and {} are typing...", typing_nicks[0], typing_nicks[1]),
+            n => format!("{} and {} others are typing...", typing_nicks[0], n - 1),
+        };
+        let style = Style::default().fg(Color::Yellow).add_modifier(Modifier::DIM);
+        let p = Paragraph::new(Line::from(Span::styled(msg, style)));
+        let r = Rect { x: inner.x, y: cur_y, width: inner.width, height: 1 };
+        f.render_widget(p, r);
+    }
 }
 
 /// Format a message line with styling, pre-wrapped at character boundaries so long words/URLs wrap.
@@ -353,6 +370,7 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
 fn format_message_line_wrapped(
     m: &MessageLine,
     current_nick: Option<&str>,
+    highlight_words: &[String],
     width: u16,
     elapsed_ms: u64,
 ) -> Text<'static> {
@@ -378,7 +396,8 @@ fn format_message_line_wrapped(
     };
     let prefix_span = Span::styled(prefix.clone(), prefix_style);
     // @@...@@ = rvIRC rainbow (animated); other text via format_outgoing + parse_irc_formatting
-    let msg_spans = crate::format::parse_message_with_rainbow(&m.text, elapsed_ms);
+    let mut msg_spans = crate::format::parse_message_with_rainbow(&m.text, elapsed_ms);
+    msg_spans = crate::format::apply_highlights_to_spans(msg_spans, highlight_words);
     let mut all_spans = vec![prefix_span];
     all_spans.extend(msg_spans);
     let w = width as usize;
@@ -851,6 +870,84 @@ fn draw_channel_list_popup(f: &mut Frame, area: Rect, app: &App) {
     };
     let mut list_state = ListState::default()
         .with_selected(Some(app.channel_list_selected_index))
+        .with_offset(offset);
+    f.render_stateful_widget(list, list_area, &mut list_state);
+}
+
+fn draw_highlight_popup(f: &mut Frame, area: Rect, app: &App) {
+    let popup_width = (area.width * 3 / 4).min(44).max(28);
+    let popup_height = (area.height * 3 / 4).min(20).max(10);
+    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
+    let popup_rect = Rect {
+        x,
+        y,
+        width: popup_width,
+        height: popup_height,
+    };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(3),
+        ])
+        .margin(1)
+        .split(popup_rect);
+
+    let add_display = if app.highlight_input.is_empty() {
+        "Add: (type and Enter)".to_string()
+    } else {
+        format!("Add: {}", app.highlight_input)
+    };
+    let list_items: Vec<ListItem> = if app.highlight_words.is_empty() {
+        vec![ListItem::new("  (no highlight words)  ")]
+    } else {
+        app.highlight_words
+            .iter()
+            .enumerate()
+            .map(|(i, w)| {
+                let line = if i == app.highlight_selected_index {
+                    format!("> {}  ", w)
+                } else {
+                    format!("  {}  ", w)
+                };
+                ListItem::new(line)
+            })
+            .collect()
+    };
+
+    f.render_widget(Clear, popup_rect);
+    let popup_style = popup_overlay_style();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Highlights ")
+        .style(popup_style);
+    f.render_widget(block, popup_rect);
+
+    let add_para = Paragraph::new(add_display).style(popup_style);
+    f.render_widget(add_para, chunks[0]);
+    let hint = Paragraph::new("j/k: move | d: remove | Enter: add word | Esc: close").style(popup_style.add_modifier(Modifier::DIM));
+    f.render_widget(hint, chunks[1]);
+
+    let list = List::new(list_items).style(popup_style);
+    let list_area = chunks[2];
+    let visible = list_area.height as usize;
+    let len = app.highlight_words.len();
+    let offset = if len <= visible || visible == 0 {
+        0
+    } else {
+        (app.highlight_selected_index + 1)
+            .saturating_sub(visible)
+            .min(len.saturating_sub(visible))
+            .max(0)
+    };
+    let mut list_state = ListState::default()
+        .with_selected(if app.highlight_words.is_empty() {
+            None
+        } else {
+            Some(app.highlight_selected_index)
+        })
         .with_offset(offset);
     f.render_stateful_widget(list, list_area, &mut list_state);
 }

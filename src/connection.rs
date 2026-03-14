@@ -66,6 +66,8 @@ pub enum IrcMessage {
     MonOffline { nicks: Vec<String> },
     /// away-notify: nick set or cleared away status. away=true if away, false if back.
     FriendAway { nick: String, away: bool },
+    /// IRCv3 typing indicator: nick typing in target with status (active|paused|done).
+    Typing { nick: String, target: String, status: String },
 }
 
 fn server_entry_to_irc_config(entry: &ServerEntry, rv: &RvConfig) -> IrcConfig {
@@ -91,7 +93,10 @@ pub fn connect(
     let (client, stream) = rt
         .block_on(async {
             let mut client = Client::from_config(irc_config).await.map_err(|e| e.to_string())?;
-            let _ = client.send_cap_req(&[Capability::AwayNotify]);
+            let _ = client.send_cap_req(&[
+                Capability::AwayNotify,
+                Capability::Custom("message-tags"),
+            ]);
             client.identify().map_err(|e| e.to_string())?;
             let stream = client.stream().map_err(|e| e.to_string())?;
             Ok::<_, String>((client, stream))
@@ -354,6 +359,25 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx) {
                             channel: channel.clone(),
                         });
                     }
+                    C::Raw(ref cmd, ref args) if cmd.eq_ignore_ascii_case("TAGMSG") => {
+                        if let (Some(target), Some(tags)) = (args.first(), msg.tags.as_ref()) {
+                            let nick = prefix_nick(msg.prefix.as_ref());
+                            for tag in tags.iter() {
+                                if tag.0 == "+typing" {
+                                    if let Some(ref status) = tag.1 {
+                                        if matches!(status.as_str(), "active" | "paused" | "done") {
+                                            let _ = tx.send(IrcMessage::Typing {
+                                                nick: nick.clone(),
+                                                target: target.clone(),
+                                                status: status.clone(),
+                                            });
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     C::PRIVMSG(ref target, ref text) => {
                         if let Some((tag, data)) = parse_ctcp(text) {
                             if tag == "ACTION" {
@@ -383,7 +407,8 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx) {
 
                 let should_skip_line = matches!(&msg.command, C::PRIVMSG(_, t) if parse_ctcp(t).is_some())
                     || matches!(&msg.command, C::Response(_, _))
-                    || matches!(&msg.command, C::AWAY(_));
+                    || matches!(&msg.command, C::AWAY(_))
+                    || matches!(&msg.command, C::Raw(ref cmd, _) if cmd.eq_ignore_ascii_case("TAGMSG"));
                 if !should_skip_line {
                     if let Some((target, line)) = message_line(&msg) {
                     let _ = tx.send(IrcMessage::Line {

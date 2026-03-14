@@ -9,6 +9,8 @@ mod events;
 mod filetransfer;
 mod format;
 mod friends;
+mod highlight;
+mod read_markers;
 mod notifications;
 mod ui;
 
@@ -19,8 +21,9 @@ use crypto::{KnownKeys, SecureSession, TofuResult, key_fingerprint};
 use base64::Engine;
 use events::{handle_key, KeyAction};
 use irc::client::prelude::*;
+use irc::proto::message::Tag;
 use irc::proto::Command as IrcCommand;
-use irc::proto::{ChannelMode as IrcChannelMode, Mode as IrcMode};
+use irc::proto::{ChannelMode as IrcChannelMode, Message as IrcProtoMessage, Mode as IrcMode};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io;
@@ -52,6 +55,10 @@ fn main() -> Result<(), String> {
         app.known_keys_path = Some(known_keys_path);
         let friends_path = config_dir.join("friends.toml");
         app.friends_path = Some(friends_path);
+        let highlight_path = config_dir.join("highlight.toml");
+        app.highlight_path = Some(highlight_path.clone());
+        app.highlight_words = crate::highlight::load_highlights(&highlight_path);
+        app.read_markers_path = Some(config_dir.join("read_markers.toml"));
     }
 
     let mut client: Option<Client> = None;
@@ -295,7 +302,7 @@ fn main() -> Result<(), String> {
         let key_action = if let Ok(true) = event {
             crossterm::event::read()
                 .ok()
-                .and_then(|ev| handle_key(ev, app.mode, app.panel_focus, app.channel_panel_visible, app.messages_panel_visible, app.user_panel_visible, app.friends_panel_visible, app.user_action_menu, app.channel_list_popup_visible, app.channel_list_scroll_mode, app.search_popup_visible, app.search_scroll_mode, app.server_list_popup_visible, app.whois_popup_visible, app.credits_popup_visible, app.license_popup_visible, app.file_receive_popup_visible, app.file_browser_visible, app.secure_accept_popup_visible))
+                .and_then(|ev| handle_key(ev, app.mode, app.panel_focus, app.channel_panel_visible, app.messages_panel_visible, app.user_panel_visible, app.friends_panel_visible, app.user_action_menu, app.channel_list_popup_visible, app.channel_list_scroll_mode, app.search_popup_visible, app.search_scroll_mode, app.server_list_popup_visible, app.whois_popup_visible, app.credits_popup_visible, app.license_popup_visible, app.file_receive_popup_visible, app.file_browser_visible, app.secure_accept_popup_visible, app.highlight_popup_visible))
         } else {
             None
         };
@@ -330,6 +337,33 @@ fn main() -> Result<(), String> {
 
     restore_terminal().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// Send IRCv3 typing indicator (TAGMSG with +typing=active|done). Throttles active to once per 3s.
+fn send_typing_indicator(app: &mut App, client: &Option<Client>, status: &str) {
+    let target = match app.current_channel.as_deref() {
+        Some(t) if t != "*server*" => t,
+        _ => return,
+    };
+    let c = match client {
+        Some(c) => c,
+        None => return,
+    };
+    if status == "active" {
+        let now = std::time::Instant::now();
+        if let Some(&last) = app.last_typing_sent.get(target) {
+            if now.duration_since(last).as_secs() < 3 {
+                return;
+            }
+        }
+        app.last_typing_sent.insert(target.to_string(), now);
+    } else if status == "done" {
+        app.last_typing_sent.remove(target);
+    }
+    let tags = Some(vec![Tag("+typing".to_string(), Some(status.to_string()))]);
+    if let Ok(msg) = IrcProtoMessage::with_tags(tags, None, "TAGMSG", vec![target]) {
+        let _ = c.send(msg);
+    }
 }
 
 fn apply_irc_message(
@@ -368,6 +402,13 @@ fn apply_irc_message(
                 app.push_message(&target, line.clone());
                 (target.clone(), line.source.clone(), line.text.clone())
             };
+            // Clear typing when user sends a message
+            app.typing_status.remove(&(source.clone(), effective_target.clone()));
+            if line.kind == MessageKind::Quit {
+                app.typing_status.retain(|(n, _), _| n != &source);
+            } else if line.kind == MessageKind::Part {
+                app.typing_status.remove(&(source.clone(), effective_target.clone()));
+            }
             // Notify when message is for a different buffer than we're viewing
             let current = app.current_channel.as_deref().unwrap_or("");
             if effective_target != current && !app.is_muted(&effective_target, &source) {
@@ -390,8 +431,10 @@ fn apply_irc_message(
             app.channel_list.retain(|c| c != &ch);
             app.clamp_channel_index();
             if app.current_channel.as_deref() == Some(ch.as_str()) {
+                app.save_current_read_marker();
                 app.current_channel = app.selected_target();
                 if let Some(t) = app.current_channel.clone() {
+                    app.restore_read_marker_for(&t);
                     app.mark_target_read(&t);
                 }
             }
@@ -422,6 +465,13 @@ fn apply_irc_message(
         M::Invite { nick, channel } => {
             app.last_invite = Some((nick.clone(), channel.clone()));
             app.status_message = format!("{} invited you to {} (use :join {} to join)", nick, channel, channel);
+        }
+        M::Typing { nick, target, status } => {
+            if status == "done" {
+                app.typing_status.remove(&(nick, target));
+            } else {
+                app.typing_status.insert((nick, target), (status, std::time::Instant::now()));
+            }
         }
         M::NickInUse | M::CtcpRequest { .. } | M::SendPrivmsg { .. } | M::SendPrivmsgOrEncrypt { .. } | M::Status(_) | M::ChatLog { .. } | M::ImageReady { .. } | M::AnimatedImageReady { .. } | M::TransferProgress { .. } | M::TransferComplete { .. } => {}
         M::MonOnline { nicks } => {
@@ -465,6 +515,8 @@ fn apply_irc_message(
             app.current_nickname = None;
             app.unread_targets.clear();
             app.unread_mentions.clear();
+            app.typing_status.clear();
+            app.last_typing_sent.clear();
             app.channel_list.clear();
             app.dm_targets.clear();
             app.clamp_messages_index();
@@ -475,6 +527,7 @@ fn apply_irc_message(
             app.channel_list_filter.clear();
             app.channel_list_scroll_mode = false;
             app.server_list_popup_visible = false;
+            app.highlight_popup_visible = false;
             app.whois_popup_visible = false;
             app.whois_nick.clear();
             app.whois_lines.clear();
@@ -559,9 +612,10 @@ fn handle_key_action(
         }
         MessageSelect => {
             if let Some(nick) = app.messages_list().get(app.messages_index).cloned() {
+                app.save_current_read_marker();
                 app.current_channel = Some(nick.clone());
                 app.mark_target_read(&nick);
-                app.message_scroll_offset = 0;
+                app.restore_read_marker_for(&nick);
                 app.panel_focus = PanelFocus::Main;
             }
         }
@@ -578,19 +632,21 @@ fn handle_key_action(
                 if !app.dm_targets.contains(&nick) {
                     app.dm_targets.push(nick.clone());
                 }
+                app.save_current_read_marker();
                 app.current_channel = Some(nick.clone());
                 app.mark_target_read(&nick);
-                app.message_scroll_offset = 0;
+                app.restore_read_marker_for(&nick);
                 app.sync_channel_index_to_current();
                 app.panel_focus = PanelFocus::Main;
             }
         }
         ChannelSelect => {
             if let Some(target) = app.channels_list().get(app.channel_index).cloned() {
+                app.save_current_read_marker();
                 app.current_channel = Some(target.clone());
                 app.mark_target_read(&target);
                 app.user_list.clear();
-                app.message_scroll_offset = 0;
+                app.restore_read_marker_for(&target);
                 if target.starts_with('#') || target.starts_with('&') {
                     request_channel_names(client, app);
                 }
@@ -811,10 +867,11 @@ fn handle_key_action(
                     if !app.channel_list.contains(&ch) {
                         app.channel_list.push(ch.clone());
                     }
+                    app.save_current_read_marker();
                     app.current_channel = Some(ch.clone());
                     app.mark_target_read(&ch);
                     app.sync_channel_index_to_current();
-                    app.message_scroll_offset = 0;
+                    app.restore_read_marker_for(&ch);
                     app.status_message = format!("Joined {}", ch);
                 }
             }
@@ -970,6 +1027,54 @@ fn handle_key_action(
             app.search_filter.clear();
             app.search_scroll_mode = false;
         }
+        HighlightPopupClose => {
+            app.highlight_popup_visible = false;
+            app.highlight_input.clear();
+        }
+        HighlightPopupUp => {
+            app.highlight_selected_index = app.highlight_selected_index.saturating_sub(1);
+        }
+        HighlightPopupDown => {
+            if app.highlight_selected_index + 1 < app.highlight_words.len() {
+                app.highlight_selected_index += 1;
+            }
+        }
+        HighlightPopupAdd => {
+            let word = app.highlight_input.trim().to_string();
+            app.highlight_input.clear();
+            if !word.is_empty() && !app.highlight_words.iter().any(|w| w.eq_ignore_ascii_case(&word)) {
+                app.highlight_words.push(word.clone());
+                app.highlight_words.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+                if let Some(ref path) = app.highlight_path {
+                    let _ = crate::highlight::save_highlights(path, &app.highlight_words);
+                }
+            }
+        }
+        HighlightPopupRemove => {
+            if app.highlight_selected_index < app.highlight_words.len() {
+                app.highlight_words.remove(app.highlight_selected_index);
+                if app.highlight_selected_index >= app.highlight_words.len() && app.highlight_selected_index > 0 {
+                    app.highlight_selected_index -= 1;
+                }
+                if let Some(ref path) = app.highlight_path {
+                    let _ = crate::highlight::save_highlights(path, &app.highlight_words);
+                }
+            }
+        }
+        HighlightPopupInputChar(c) => {
+            app.highlight_input.push(c);
+        }
+        HighlightPopupBackspace => {
+            if !app.highlight_input.is_empty() {
+                let i = app.highlight_input
+                    .char_indices()
+                    .rev()
+                    .next()
+                    .map(|(i, _)| i)
+                    .unwrap_or(app.highlight_input.len());
+                app.highlight_input.truncate(i);
+            }
+        }
         SearchPopupFocusList => {
             app.search_scroll_mode = true;
         }
@@ -993,6 +1098,9 @@ fn handle_key_action(
                 if app.mode == Mode::Insert || app.mode == Mode::Command {
                     app.input.push(c);
                     app.input_cursor = app.input.len();
+                    if app.mode == Mode::Insert {
+                        send_typing_indicator(app, client, "active");
+                    }
                 }
             }
         }
@@ -1057,6 +1165,7 @@ fn handle_key_action(
                     if target == "*server*" {
                         app.status_message = "Cannot send to server.".to_string();
                     } else if !text.is_empty() {
+                        send_typing_indicator(app, client, "done");
                         let formatted = format::format_outgoing(&text);
                         if app.secure_sessions.contains_key(&target) {
                             let session = app.secure_sessions.get_mut(&target).unwrap();
@@ -1317,6 +1426,9 @@ fn handle_key_action(
             app.status_message = "File transfer cancelled.".to_string();
         }
         Esc => {
+            if app.mode == Mode::Insert {
+                send_typing_indicator(app, client, "done");
+            }
             app.mode = Mode::Normal;
             app.input.clear();
             app.input_cursor = 0;
@@ -1350,10 +1462,11 @@ fn run_command(
                 }
                 let _ = c.send_topic(&ch, "");
                 app.channel_list.push(ch.clone());
+                app.save_current_read_marker();
                 app.current_channel = Some(ch.clone());
                 app.mark_target_read(&ch);
                 app.sync_channel_index_to_current();
-                app.message_scroll_offset = 0;
+                app.restore_read_marker_for(&ch);
                 app.status_message = format!("Joined {}", ch);
             } else {
                 app.status_message = "Not connected.".to_string();
@@ -1366,16 +1479,24 @@ fn run_command(
                     app.channel_list.retain(|x| x != &target);
                 }
                 app.clamp_channel_index();
+                app.save_current_read_marker();
                 app.current_channel = app.selected_target();
+                if let Some(t) = app.current_channel.clone() {
+                    app.restore_read_marker_for(&t);
+                }
             } else {
                 // DM: close the message window
                 if app.dm_targets.contains(&target) {
                     app.dm_targets.retain(|x| x != &target);
                     app.clamp_messages_index();
                     if app.current_channel.as_ref() == Some(&target) {
+                        app.save_current_read_marker();
                         app.current_channel = app.messages_list().first().cloned()
                             .or_else(|| app.channels_list().first().cloned());
                         app.sync_channel_index_to_current();
+                        if let Some(t) = app.current_channel.clone() {
+                            app.restore_read_marker_for(&t);
+                        }
                     }
                     app.status_message = format!("Closed DM with {}", target);
                 } else {
@@ -1396,15 +1517,23 @@ fn run_command(
                         }
                     }
                     app.clamp_channel_index();
+                    app.save_current_read_marker();
                     app.current_channel = app.selected_target();
+                    if let Some(t) = app.current_channel.clone() {
+                        app.restore_read_marker_for(&t);
+                    }
                 } else {
                     // DM: close the message window
                     if app.dm_targets.contains(&target) {
                         app.dm_targets.retain(|x| x != &target);
                         app.clamp_messages_index();
+                        app.save_current_read_marker();
                         app.current_channel = app.messages_list().first().cloned()
                             .or_else(|| app.channels_list().first().cloned());
                         app.sync_channel_index_to_current();
+                        if let Some(t) = app.current_channel.clone() {
+                            app.restore_read_marker_for(&t);
+                        }
                         app.status_message = format!("Closed DM with {}", target);
                     }
                 }
@@ -1509,6 +1638,47 @@ fn run_command(
                 }
             }
         }
+        R::Disconnect => {
+            app.clear_reconnect();
+            if let Some(ref c) = client {
+                let _ = c.send_quit("Leaving");
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            if let Some(h) = stream_handle.take() {
+                h.abort();
+            }
+            drop(client.take());
+            app.current_server = None;
+            app.current_channel = None;
+            app.current_nickname = None;
+            app.unread_targets.clear();
+            app.unread_mentions.clear();
+            app.typing_status.clear();
+            app.last_typing_sent.clear();
+            app.channel_list.clear();
+            app.dm_targets.clear();
+            app.clamp_messages_index();
+            app.user_list.clear();
+            app.search_popup_visible = false;
+            app.channel_list_popup_visible = false;
+            app.server_channel_list.clear();
+            app.channel_list_filter.clear();
+            app.channel_list_scroll_mode = false;
+            app.server_list_popup_visible = false;
+            app.highlight_popup_visible = false;
+            app.whois_popup_visible = false;
+            app.whois_nick.clear();
+            app.whois_lines.clear();
+            app.pending_auto_join = false;
+            app.auto_join_after = None;
+            app.channel_topics.clear();
+            app.channel_modes.clear();
+            app.last_invite = None;
+            app.friends_online.clear();
+            app.friends_away.clear();
+            app.away_message = None;
+            app.status_message = "Disconnected. Type :connect <server> to reconnect.".to_string();
+        }
         R::Quit(_) => {
             app.clear_reconnect();
             if let Some(ref c) = client {
@@ -1552,10 +1722,11 @@ fn run_command(
                 if !app.dm_targets.contains(&nick) {
                     app.dm_targets.push(nick.clone());
                 }
+                app.save_current_read_marker();
                 app.current_channel = Some(nick.clone());
                 app.mark_target_read(&nick);
                 app.sync_channel_index_to_current();
-                app.message_scroll_offset = 0;
+                app.restore_read_marker_for(&nick);
                 app.status_message = format!("Message sent to {}", nick);
             }
         }
@@ -1663,10 +1834,16 @@ fn run_command(
             }
         }
         R::SwitchChannel(ch) => {
+            app.save_current_read_marker();
             app.current_channel = Some(ch.clone());
             app.mark_target_read(&ch);
             app.sync_channel_index_to_current();
-            app.message_scroll_offset = 0;
+            app.restore_read_marker_for(&ch);
+        }
+        R::Highlight => {
+            app.highlight_popup_visible = true;
+            app.highlight_input.clear();
+            app.highlight_selected_index = 0;
         }
         R::Search => {
             app.search_popup_visible = true;
@@ -1768,6 +1945,34 @@ fn run_command(
                 app.status_message = format!("Removed {} from friends.", nick);
             } else {
                 app.status_message = format!("{} is not in friends list.", nick);
+            }
+        }
+        R::Ignore(nick) => {
+            let nick = nick.trim();
+            if !nick.is_empty() {
+                if let Some(ref c) = client {
+                    use irc::proto::Command as Ic;
+                    match c.send(Ic::Raw("SILENCE".to_string(), vec![format!("+{}", nick)])) {
+                        Ok(()) => app.status_message = format!("Ignored {} (server-side).", nick),
+                        Err(e) => app.status_message = format!("Ignore failed: {} (server may not support SILENCE)", e),
+                    }
+                } else {
+                    app.status_message = "Not connected.".to_string();
+                }
+            }
+        }
+        R::Unignore(nick) => {
+            let nick = nick.trim();
+            if !nick.is_empty() {
+                if let Some(ref c) = client {
+                    use irc::proto::Command as Ic;
+                    match c.send(Ic::Raw("SILENCE".to_string(), vec![format!("-{}", nick)])) {
+                        Ok(()) => app.status_message = format!("Unignored {}.", nick),
+                        Err(e) => app.status_message = format!("Unignore failed: {}", e),
+                    }
+                } else {
+                    app.status_message = "Not connected.".to_string();
+                }
             }
         }
         R::NotificationsOn => {
@@ -1976,7 +2181,7 @@ fn run_command(
 /// Tab completion: command name only (first word after :).
 fn complete_input(app: &mut App) {
     const COMMANDS: &[&str] = &[
-        "join", "part", "list", "servers", "connect", "reconnect", "quit", "q", "clear", "invite", "away", "unban", "search",
+        "join", "part", "list", "servers", "connect", "reconnect", "disconnect", "quit", "q", "clear", "invite", "away", "unban", "search",
         "msg", "me", "nick", "topic", "kick", "ban", "channel", "chan", "c",
         "channel-panel", "messages-panel", "user-panel", "friends-panel", "channels", "users",
         "version", "credits", "license",

@@ -569,6 +569,80 @@ pub fn strip_irc_codes(s: &str) -> String {
 
 /// Strip IRC codes and @@...@@ for display-width calculation (visible text only).
 
+/// Find ranges (start, end) in text where any highlight word appears (case-insensitive).
+/// Ranges are merged when overlapping.
+fn find_highlight_ranges(text: &str, words: &[String]) -> Vec<(usize, usize)> {
+    if words.is_empty() {
+        return Vec::new();
+    }
+    let text_lower = text.to_lowercase();
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for word in words {
+        if word.is_empty() {
+            continue;
+        }
+        let w = word.to_lowercase();
+        let mut i = 0;
+        while let Some(pos) = text_lower[i..].find(&w) {
+            let start = i + pos;
+            let end = start + w.len();
+            ranges.push((start, end));
+            i = start + 1;
+        }
+    }
+    ranges.sort_by_key(|r| r.0);
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (s, e) in ranges {
+        if let Some(last) = merged.last_mut() {
+            if s <= last.1 {
+                last.1 = last.1.max(e);
+                continue;
+            }
+        }
+        merged.push((s, e));
+    }
+    merged
+}
+
+/// Apply highlight styling to spans: substrings matching highlight words get yellow+bold.
+pub fn apply_highlights_to_spans(
+    spans: Vec<Span<'static>>,
+    words: &[String],
+) -> Vec<Span<'static>> {
+    if words.is_empty() {
+        return spans;
+    }
+    let highlight_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let mut result = Vec::new();
+    for span in spans {
+        let content = span.content.as_ref();
+        let base_style = span.style;
+        let ranges = find_highlight_ranges(content, words);
+        if ranges.is_empty() {
+            result.push(span);
+            continue;
+        }
+        let mut pos = 0;
+        for (start, end) in ranges {
+            if start > pos {
+                result.push(Span::styled(
+                    content[pos..start].to_string(),
+                    base_style,
+                ));
+            }
+            result.push(Span::styled(
+                content[start..end].to_string(),
+                base_style.patch(highlight_style),
+            ));
+            pos = end;
+        }
+        if pos < content.len() {
+            result.push(Span::styled(content[pos..].to_string(), base_style));
+        }
+    }
+    result
+}
+
 /// Wrap styled spans to fit width, splitting spans as needed.
 pub fn wrap_spans(spans: &[Span<'static>], max_width: usize) -> Vec<Line<'static>> {
     if max_width == 0 {

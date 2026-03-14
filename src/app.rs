@@ -252,6 +252,21 @@ pub struct App {
     pub sounds_enabled: bool,
     pub next_image_id: usize,
     pub inline_images: HashMap<usize, InlineImage>,
+
+    /// :highlight popup: list of words to highlight in messages.
+    pub highlight_popup_visible: bool,
+    pub highlight_words: Vec<String>,
+    pub highlight_input: String,
+    pub highlight_selected_index: usize,
+    /// Path to highlight.toml.
+    pub highlight_path: Option<PathBuf>,
+    /// Path to read_markers.toml.
+    pub read_markers_path: Option<PathBuf>,
+
+    /// IRCv3 typing: (nick, target) -> (status: "active"|"paused"|"done", received_at). Shown with 6s timeout for active, 30s for paused.
+    pub typing_status: HashMap<(String, String), (String, Instant)>,
+    /// When we last sent a typing indicator per target (for throttle: max once per 3s).
+    pub last_typing_sent: HashMap<String, Instant>,
 }
 
 /// An inline image: either a static frame or an animated GIF with pre-encoded frames.
@@ -391,6 +406,14 @@ impl App {
             sounds_enabled: true,
             next_image_id: 0,
             inline_images: HashMap::new(),
+            highlight_popup_visible: false,
+            highlight_words: Vec::new(),
+            highlight_input: String::new(),
+            highlight_selected_index: 0,
+            highlight_path: None,
+            read_markers_path: None,
+            typing_status: HashMap::new(),
+            last_typing_sent: HashMap::new(),
         }
     }
 
@@ -430,6 +453,22 @@ impl App {
     pub fn mark_target_read(&mut self, target: &str) {
         self.unread_targets.remove(target);
         self.unread_mentions.remove(target);
+    }
+
+    /// Nicks currently typing in target (active: 6s timeout, paused: 30s). Excludes ourselves.
+    pub fn typing_nicks_for_target(&self, target: &str) -> Vec<String> {
+        let now = Instant::now();
+        let our_nick = self.current_nickname.as_deref().unwrap_or("");
+        self.typing_status
+            .iter()
+            .filter(|((nick, t), (status, at))| {
+                t.as_str() == target
+                    && *nick != our_nick
+                    && (status.as_str() == "active" && now.duration_since(*at).as_secs() < 6
+                        || status.as_str() == "paused" && now.duration_since(*at).as_secs() < 30)
+            })
+            .map(|((nick, _), _)| nick.clone())
+            .collect()
     }
 
     /// Filtered server channel list for the :list popup (substring match on name, case-insensitive).
@@ -602,10 +641,55 @@ impl App {
         if target != current {
             self.unread_targets.insert(target.to_string());
             let nick = self.current_nickname.as_deref().unwrap_or("");
-            if !nick.is_empty() && line.text.to_lowercase().contains(&nick.to_lowercase()) {
+            let mention = !nick.is_empty() && line.text.to_lowercase().contains(&nick.to_lowercase());
+            let highlight = self.highlight_matches(&line.text);
+            if mention || highlight {
                 self.unread_mentions.insert(target.to_string());
             }
         }
+    }
+
+    /// Save current target's read position (scroll offset) to read_markers.
+    pub fn save_current_read_marker(&self) {
+        let Some(ref target) = self.current_channel else { return };
+        if target.is_empty() {
+            return;
+        }
+        if let Some(ref path) = self.read_markers_path {
+            let _ = crate::read_markers::save_read_offset(
+                path,
+                self.current_server.as_deref(),
+                target,
+                self.message_scroll_offset,
+            );
+        }
+    }
+
+    /// Restore read position for target from read_markers.
+    pub fn restore_read_marker_for(&mut self, target: &str) {
+        if target.is_empty() {
+            return;
+        }
+        if let Some(ref path) = self.read_markers_path {
+            if let Some(offset) = crate::read_markers::load_read_offset(
+                path,
+                self.current_server.as_deref(),
+                target,
+            ) {
+                self.message_scroll_offset = offset;
+            }
+        }
+    }
+
+    /// True if text contains any highlight word (case-insensitive substring).
+    pub fn highlight_matches(&self, text: &str) -> bool {
+        if self.highlight_words.is_empty() {
+            return false;
+        }
+        let t = text.to_lowercase();
+        self.highlight_words
+            .iter()
+            .any(|w| !w.is_empty() && t.contains(&w.to_lowercase()))
     }
 
     #[allow(dead_code)]

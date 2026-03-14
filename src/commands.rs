@@ -12,6 +12,7 @@ pub enum CommandResult {
     Servers,
     Connect(String),
     Reconnect,
+    Disconnect,
     Quit(()),
     Msg { nick: String, text: String },
     Me(String), // ACTION to current target
@@ -50,6 +51,9 @@ pub enum CommandResult {
     SendFile { nick: String, path: String },
     Clear,
     Search,
+    Highlight,
+    Ignore(String),
+    Unignore(String),
     NotificationsOn,
     NotificationsOff,
     Mute,
@@ -96,6 +100,7 @@ pub fn parse(line: &str) -> CommandResult {
             }
         }
         "reconnect" => CommandResult::Reconnect,
+        "disconnect" => CommandResult::Disconnect,
         "quit" | "exit" => CommandResult::Quit(()),
         "q" if rest.trim().is_empty() => CommandResult::Quit(()),
         "me" => {
@@ -283,6 +288,7 @@ pub fn parse(line: &str) -> CommandResult {
         }
         "clear" => CommandResult::Clear,
         "search" => CommandResult::Search,
+        "highlight" => CommandResult::Highlight,
         "away" => {
             let msg = rest.trim();
             if msg.is_empty() {
@@ -297,6 +303,22 @@ pub fn parse(line: &str) -> CommandResult {
                 "on" => CommandResult::NotificationsOn,
                 "off" => CommandResult::NotificationsOff,
                 _ => CommandResult::StatusMessage("Usage: :notifications on|off".to_string()),
+            }
+        }
+        "ignore" => {
+            let nick = rest.split_whitespace().next().unwrap_or("").to_string();
+            if nick.is_empty() {
+                CommandResult::StatusMessage("Usage: :ignore <nick>".to_string())
+            } else {
+                CommandResult::Ignore(nick)
+            }
+        }
+        "unignore" => {
+            let nick = rest.split_whitespace().next().unwrap_or("").to_string();
+            if nick.is_empty() {
+                CommandResult::StatusMessage("Usage: :unignore <nick>".to_string())
+            } else {
+                CommandResult::Unignore(nick)
             }
         }
         "mute" => CommandResult::Mute,
