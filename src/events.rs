@@ -25,6 +25,9 @@ pub fn handle_key(
     secure_accept_popup_visible: bool,
     highlight_popup_visible: bool,
 ) -> Option<KeyAction> {
+    if let Event::Paste(s) = event {
+        return Some(KeyAction::Paste(s));
+    }
     let key = match event {
         Event::Key(k) => k,
         _ => return None,
@@ -173,6 +176,8 @@ pub enum KeyAction {
     HighlightPopupClose,
     HighlightPopupInputChar(char),
     HighlightPopupBackspace,
+    /// Bracketed paste: insert string at cursor in one go (avoids O(n²) char-by-char).
+    Paste(String),
 }
 
 fn handle_normal(key: KeyEvent, panel_focus: PanelFocus) -> Option<KeyAction> {

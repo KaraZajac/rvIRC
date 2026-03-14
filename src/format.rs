@@ -9,6 +9,9 @@ pub const MAX_MESSAGE_BYTES: usize = 460;
 // ChaCha20-Poly1305: ciphertext = plaintext + 16. Base64 expands 4/3. 200 bytes plaintext → ~287 B64 + 31 ≈ 318.
 pub const MAX_ENCRYPTED_PLAINTEXT_BYTES: usize = 200;
 
+/// Max input bar bytes to avoid O(n²) lag and terminal issues with huge pastes.
+pub const MAX_INPUT_BYTES: usize = 32 * 1024;
+
 /// Split text into chunks that fit within IRC message limits, at UTF-8 boundaries.
 /// Returns the original string as sole chunk if it fits; otherwise multiple chunks.
 pub fn split_message_for_irc(text: &str, max_bytes: usize) -> Vec<String> {

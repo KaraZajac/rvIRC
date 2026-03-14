@@ -1166,6 +1166,9 @@ fn handle_key_action(
         Char(c) => {
             if c != '\0' {
                 if app.mode == Mode::Insert || app.mode == Mode::Command {
+                    if app.input.len() >= format::MAX_INPUT_BYTES {
+                        return Ok(false);
+                    }
                     if let Some((start, end)) = app.input_selection.take() {
                         let lo = app.input.floor_char_boundary(start.min(end).min(app.input.len()));
                         let hi = app.input.ceil_char_boundary(start.max(end).min(app.input.len()));
@@ -1180,6 +1183,38 @@ fn handle_key_action(
                     if app.mode == Mode::Insert {
                         send_typing_indicator(app, client, "active");
                     }
+                }
+            }
+        }
+        Paste(s) => {
+            if app.mode == Mode::Insert || app.mode == Mode::Command {
+                // Filter control chars, keep printable; replace newlines with space for single-line IRC.
+                let s: String = s
+                    .chars()
+                    .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+                    .filter(|c| !c.is_control() || *c == ' ')
+                    .collect();
+                if s.is_empty() {
+                    return Ok(false);
+                }
+                let remaining = format::MAX_INPUT_BYTES.saturating_sub(app.input.len());
+                let to_insert: &str = if s.len() <= remaining { &s } else { &s[..s.floor_char_boundary(remaining)] };
+                if to_insert.is_empty() {
+                    return Ok(false);
+                }
+                if let Some((start, end)) = app.input_selection.take() {
+                    let lo = app.input.floor_char_boundary(start.min(end).min(app.input.len()));
+                    let hi = app.input.ceil_char_boundary(start.max(end).min(app.input.len()));
+                    app.input.replace_range(lo..hi, to_insert);
+                    app.input_cursor = lo + to_insert.len();
+                } else {
+                    let len = app.input.len();
+                    app.input_cursor = app.input.floor_char_boundary(app.input_cursor.min(len));
+                    app.input.insert_str(app.input_cursor, to_insert);
+                    app.input_cursor += to_insert.len();
+                }
+                if app.mode == Mode::Insert {
+                    send_typing_indicator(app, client, "active");
                 }
             }
         }
