@@ -8,34 +8,29 @@
 
 - **Rust** (latest stable): <https://rustup.rs/>
 
-## Features
+## Capabilities
 
-- **Vim-style modes**: NORMAL, INSERT, COMMAND with distinct status bar colors (blue, green, orange).
-- **Commands**: `:connect`, `:servers`, `:join`, `:list`, `:part`, `:msg`, `:quit`, and more (see below).
-- **Panes**: Channels and messages (left), users and friends (right). Toggle with `c` / `m` / `u` / `f`; j/k or arrows + Enter to switch channel, open DM, or run user actions (DM, whois, etc.).
-- **Friends list**: Track nicks with `:add-friend` / `:remove-friend`. Names are colored by status (green = online, yellow = away, red = offline). Uses IRC MONITOR and away-notify. Config `offline_friends = "hide"` omits offline friends.
-- **Config**: `~/.config/rvIRC/config.toml` — multiple servers, nickname, optional NickServ identify and auto-join. Connect order: connect → identify with NickServ (if set) → then auto-join channels.
-- **Auto-reconnect**: After an unexpected disconnect, the client retries up to 3 times (5s, 15s, 30s). Manual `:connect` or `:quit` cancels auto-reconnect.
-- **Encrypted DMs**: Two rvIRC clients can establish an end-to-end encrypted DM session using `:secure` (or `:secure <nick>`). Uses fresh ephemeral X25519 key exchange per session + ChaCha20-Poly1305 with directional keys (no nonce reuse). A green lock icon appears in the channel list next to secure sessions; a checkmark appears when the peer is verified. Incoming requests show an accept/reject popup. Persistent identity keys are stored in `~/.config/rvIRC/identity.toml`. Trust on First Use (TOFU) key tracking warns if a peer's identity key changes. Optional SAS verification via `:verify` / `:verified`.
-- **File Transfer**: Send files between rvIRC clients using `:sendfile` (opens a file browser) or `:sendfile <nick> <path>`. Uses [magic-wormhole](https://crates.io/crates/magic-wormhole) for secure relay-based file transfer. The recipient gets a popup to accept or reject the file. In-chat status messages track transfer progress.
-- **Message area**: Long messages wrap to the pane width. The view auto-scrolls to the bottom when new messages arrive (scroll up with k/j or Page Up/Down to read history). Links that end in an image extension (e.g. `.png`, `.jpg`, `.gif`) are fetched and displayed inline in the chat using [ratatui-image](https://crates.io/crates/ratatui-image) when your terminal supports it (e.g. Sixel, Kitty, iTerm2); this works in channels, DMs, and encrypted DMs. Animated GIFs are fully animated: frames are pre-encoded when loaded, and only GIFs visible on screen animate (off-screen ones stay paused to save CPU).
-- **Notifications**: Desktop notifications and optional sound when messages arrive in a buffer you're not viewing. Config `notifications` and `sounds`; `:notifications on|off` and `:mute` / `:unmute` at runtime.
-- **IRC formatting**: Messages support bold, italic, strikethrough, and colors. Use `*italic*`, `**bold**`, `***bold italic***`, `~~strikethrough~~`, `||spoiler||` (rendered dim), and `:colorname: text :colorname:` for colors (e.g. `:blue:`, `:red:`, `:green:`). Use `:normal:` to reset formatting (e.g. `:red: red :normal: back to default`). Compatible with [IRC format codes](https://modern.ircdocs.horse/formatting).
-- **rvIRC effects** (sent as literal text; only rvIRC displays them): `@@text@@` = animated rainbow (cycles colors). `$$text$$` = scared (randomly flickers between normal, white, black, grey, bold).
-
-## IRC capabilities
-
-rvIRC negotiates the following IRCv3 capabilities where the server supports them:
-
-| Capability | Requested | Used for |
-|------------|:---------:|----------|
-| `away-notify` | ✓ | Friends list: away status (yellow) vs online (green) |
-| `message-tags` | ✓ | Typing indicators, server-time in PRIVMSG tags |
-| `server-time` | ✓ | Timestamps on messages when server provides `time` tag |
-| `batch` | ✓ | Batching for chathistory responses |
-| `draft/chathistory` | ✓ | Chat history on channel join |
-| `echo-message` | — | When server acks: server echoes our messages; else rvIRC local-echoes |
-| `sasl` | ✓ | SASL PLAIN or EXTERNAL (when `sasl_mechanism` set in server config) |
+| Capability | Description |
+|------------|-------------|
+| **Vim-style modes** | NORMAL, INSERT, COMMAND with distinct status bar colors (blue, green, orange) |
+| **Commands** | `:connect`, `:servers`, `:join`, `:list`, `:part`, `:msg`, `:quit`, and more (see below) |
+| **Panes** | Channels and messages (left), users and friends (right). Toggle with `c` / `m` / `u` / `f`; j/k or arrows + Enter to switch channel, open DM, or run user actions |
+| **Friends list** | Track nicks with `:add-friend` / `:remove-friend`. Names colored by status (green = online, yellow = away, red = offline). Uses IRC MONITOR and away-notify. Config `offline_friends = "hide"` omits offline friends |
+| **Config** | `~/.config/rvIRC/config.toml` — multiple servers, nickname, optional NickServ identify and auto-join. Per-server auto-connect and auto_join |
+| **Auto-reconnect** | After unexpected disconnect, retries up to 3 times (5s, 15s, 30s). Manual `:connect` or `:quit` cancels |
+| **Encrypted DMs** | End-to-end encrypted DM via `:secure`. X25519 + ChaCha20-Poly1305, directional keys, TOFU, SAS verification. Lock icon and checkmark in channel list |
+| **File transfer** | Send files via `:sendfile` using [magic-wormhole](https://crates.io/crates/magic-wormhole). Accept/reject popup; in-chat progress |
+| **Message area** | Wrap, auto-scroll, k/j or Page Up/Down for history. Inline images via [ratatui-image](https://crates.io/crates/ratatui-image) (Sixel, Kitty, iTerm2). Animated GIFs in channels, DMs, encrypted DMs |
+| **Notifications** | Desktop notifications and optional sound for unviewed buffers. Config `notifications` and `sounds`; `:notifications on|off` and `:mute` / `:unmute` |
+| **IRC formatting** | Bold, italic, strikethrough, colors. `*italic*`, `**bold**`, `~~strikethrough~~`, `||spoiler||`, `:colorname:` — compatible with [IRC format codes](https://modern.ircdocs.horse/formatting) |
+| **rvIRC effects** | `@@text@@` = animated rainbow; `$$text$$` = scared (flicker) — sent as literal text, only rvIRC renders |
+| **IRC: away-notify** | Friends list away status (yellow vs green) |
+| **IRC: message-tags** | Typing indicators, server-time in PRIVMSG tags |
+| **IRC: server-time** | Timestamps on messages when server provides `time` tag |
+| **IRC: batch** | Batching for chathistory responses |
+| **IRC: draft/chathistory** | Chat history on channel join |
+| **IRC: echo-message** | When server acks: server echoes our messages; else rvIRC local-echoes |
+| **IRC: sasl** | SASL PLAIN or EXTERNAL (when `sasl_mechanism` set in server config) |
 
 ## Build & run
 
