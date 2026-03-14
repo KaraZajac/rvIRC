@@ -402,8 +402,11 @@ fn apply_irc_message(
                 app.push_message(&target, line.clone());
                 (target.clone(), line.source.clone(), line.text.clone())
             };
-            // Clear typing when user sends a message
+            // Clear typing when user sends a message (for DMs, typing is stored as (nick, our_nick))
             app.typing_status.remove(&(source.clone(), effective_target.clone()));
+            if let Some(ref our_nick) = app.current_nickname {
+                app.typing_status.remove(&(source.clone(), our_nick.clone()));
+            }
             if line.kind == MessageKind::Quit {
                 app.typing_status.retain(|(n, _), _| n != &source);
             } else if line.kind == MessageKind::Part {
@@ -1990,6 +1993,14 @@ fn run_command(
         R::Unmute => {
             app.sounds_enabled = true;
             app.status_message = "Sounds unmuted.".to_string();
+        }
+        R::DebugTyping => {
+            let n = app.typing_status.len();
+            let preview: Vec<String> = app.typing_status.iter()
+                .take(3)
+                .map(|((nick, t), (status, _))| format!("{}->{}:{}", nick, t, status))
+                .collect();
+            app.status_message = format!("Typing status ({} entries): {:?}", n, preview);
         }
         R::Version => {
             app.status_message = "rvIRC 1.0.0".to_string();

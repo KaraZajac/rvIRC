@@ -456,13 +456,16 @@ impl App {
     }
 
     /// Nicks currently typing in target (active: 6s timeout, paused: 30s). Excludes ourselves.
+    /// For channels: target in message is the channel. For DMs: sender addressed us (target=our_nick), we're viewing the DM with them.
     pub fn typing_nicks_for_target(&self, target: &str) -> Vec<String> {
         let now = Instant::now();
         let our_nick = self.current_nickname.as_deref().unwrap_or("");
         self.typing_status
             .iter()
             .filter(|((nick, t), (status, at))| {
-                t.as_str() == target
+                let matches = t.as_str() == target
+                    || (t.as_str() == our_nick && nick.as_str() == target);
+                matches
                     && *nick != our_nick
                     && (status.as_str() == "active" && now.duration_since(*at).as_secs() < 6
                         || status.as_str() == "paused" && now.duration_since(*at).as_secs() < 30)

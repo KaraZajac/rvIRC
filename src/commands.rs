@@ -58,6 +58,7 @@ pub enum CommandResult {
     NotificationsOff,
     Mute,
     Unmute,
+    DebugTyping,
     NoOp,
     Unknown(String),
 }
@@ -323,6 +324,7 @@ pub fn parse(line: &str) -> CommandResult {
         }
         "mute" => CommandResult::Mute,
         "unmute" => CommandResult::Unmute,
+        "debug-typing" => CommandResult::DebugTyping,
         _ => CommandResult::Unknown(format!("Unknown command: {}", cmd)),
     }
 }

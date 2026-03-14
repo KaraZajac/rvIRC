@@ -237,6 +237,11 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
         return;
     }
 
+    // Reserve 1 row at bottom for typing indicator when present
+    let typing_nicks = app.typing_nicks_for_target(&target_key);
+    let typing_reserved = if typing_nicks.is_empty() { 0 } else { 1 };
+    let message_height = content_height.saturating_sub(typing_reserved);
+
     let messages: Vec<MessageLine> = app
         .current_messages()
         .iter()
@@ -283,7 +288,7 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
 
     let mut visible_start = 0;
     {
-        let mut remaining = content_height;
+        let mut remaining = message_height;
         let mut i = visible_end;
         while i > 0 {
             i -= 1;
@@ -297,7 +302,7 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
             remaining -= h;
             visible_start = i;
         }
-        if visible_end > 0 && visible_start == 0 && remaining >= content_height {
+        if visible_end > 0 && visible_start == 0 && remaining >= message_height {
             visible_start = visible_end - 1;
         }
     }
@@ -306,7 +311,7 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
         .iter()
         .map(|h| *h as usize)
         .sum();
-    let top_pad = content_height.saturating_sub(visible_rows) as u16;
+    let top_pad = message_height.saturating_sub(visible_rows) as u16;
     let mut cur_y = content_y + top_pad;
     let max_y = content_y + content_height as u16;
     let nick = app.current_nickname.as_deref().map(|s| s.to_string());
@@ -350,9 +355,8 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
         }
     }
 
-    // IRCv3 typing indicator at bottom of message area
-    let typing_nicks = app.typing_nicks_for_target(&target_key);
-    if !typing_nicks.is_empty() && cur_y < max_y {
+    // IRCv3 typing indicator at bottom of message area (reserved row)
+    if !typing_nicks.is_empty() {
         let msg = match typing_nicks.len() {
             1 => format!("{} is typing...", typing_nicks[0]),
             2 => format!("{} and {} are typing...", typing_nicks[0], typing_nicks[1]),
@@ -360,7 +364,8 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
         };
         let style = Style::default().fg(Color::Yellow).add_modifier(Modifier::DIM);
         let p = Paragraph::new(Line::from(Span::styled(msg, style)));
-        let r = Rect { x: inner.x, y: cur_y, width: inner.width, height: 1 };
+        let typing_y = content_y + content_height as u16 - 1;
+        let r = Rect { x: inner.x, y: typing_y, width: inner.width, height: 1 };
         f.render_widget(p, r);
     }
 }
