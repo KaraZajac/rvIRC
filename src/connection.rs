@@ -17,6 +17,12 @@ pub type IrcMessageTx = mpsc::UnboundedSender<IrcMessage>;
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum IrcMessage {
+    /// Server acknowledged these caps (e.g. echo-message, multi-prefix).
+    CapsAcked(Vec<String>),
+    /// Server rejected these caps (NAK).
+    CapsNak(Vec<String>),
+    /// Caps we requested (for display: requested - acked = nakd).
+    CapRequested(Vec<String>),
     Line { target: String, line: MessageLine },
     JoinedChannel(String),
     PartedChannel(String),
@@ -76,6 +82,10 @@ pub enum IrcMessage {
     ChathistoryBatch { target: String, lines: Vec<MessageLine> },
 }
 
+fn cap_to_name(c: &Capability) -> String {
+    c.as_ref().to_lowercase()
+}
+
 fn server_entry_to_irc_config(entry: &ServerEntry, rv: &RvConfig) -> IrcConfig {
     use irc::client::data::ProxyType;
 
@@ -127,9 +137,14 @@ pub fn connect(
         .as_deref()
         .map(|s| s.to_lowercase());
 
-    let (client, stream) = rt.block_on(async {
+    let (client, stream, acked_caps, requested) = rt.block_on(async {
         let mut client = Client::from_config(irc_config.clone()).await.map_err(|e| e.to_string())?;
 
+        // Some servers (e.g. Libera) require CAP LS 302 before they accept CAP REQ.
+        use irc::proto::caps::NegotiationVersion;
+        let _ = client.send_cap_ls(NegotiationVersion::V302);
+
+        // Request caps one at a time; some servers (e.g. Libera) NAK batches but ACK individual caps.
         let mut caps: Vec<Capability> = vec![
             Capability::AwayNotify,
             Capability::Custom("message-tags"),
@@ -140,9 +155,16 @@ pub fn connect(
         if sasl_mechanism.is_some() {
             caps.push(Capability::Sasl);
         }
-        let _ = client.send_cap_req(&caps);
+        let requested: Vec<String> = caps
+            .iter()
+            .map(|c| cap_to_name(c))
+            .collect();
+        for cap in &caps {
+            let _ = client.send_cap_req(std::slice::from_ref(cap));
+        }
 
         let mut stream = client.stream().map_err(|e| e.to_string())?;
+        let mut acked_caps: Vec<String> = Vec::new();
 
         if let Some(ref mechanism) = sasl_mechanism {
             // Custom SASL registration: consume stream until SASL complete, then send CAP END + identify.
@@ -170,8 +192,11 @@ pub fn connect(
             while let Some(result) = stream.next().await {
                 let msg = result.map_err(|e| e.to_string())?;
                 match &msg.command {
-                    IrcCommand::CAP(_, CapSubCommand::ACK, _, params) => {
-                        let acked = params.as_deref().unwrap_or("");
+                    IrcCommand::CAP(_, CapSubCommand::ACK, multi, params) => {
+                        let acked = params.as_deref().or_else(|| multi.as_deref()).unwrap_or("");
+                        for c in acked.split_whitespace() {
+                            acked_caps.push(c.to_lowercase());
+                        }
                         if acked.split_whitespace().any(|c| c.eq_ignore_ascii_case("sasl")) {
                             sasl_acked = true;
                             if !sasl_sent_mechanism {
@@ -234,12 +259,17 @@ pub fn connect(
             client.identify().map_err(|e| e.to_string())?;
         }
 
-        Ok::<_, String>((client, stream))
+        Ok::<_, String>((client, stream, acked_caps, requested))
     })?;
 
     let _ = tx.send(IrcMessage::Connected {
         server: server_entry.name.clone(),
     });
+    let _ = tx.send(IrcMessage::CapRequested(requested.clone()));
+    // Forward acked caps from SASL loop (non-SASL path gets them via run_stream)
+    if !acked_caps.is_empty() {
+        let _ = tx.send(IrcMessage::CapsAcked(acked_caps));
+    }
     Ok((client, stream))
 }
 
@@ -279,10 +309,18 @@ fn batch_message_to_line(msg: &irc::proto::Message) -> Option<(String, MessageLi
         IrcCommand::NOTICE(t, m) => (t.clone(), m.clone(), MessageKind::Notice),
         _ => return None,
     };
+    let account = account_from_tags(msg.tags.as_ref()).unwrap_or(None);
     Some((
         target.clone(),
-        MessageLine { source, text, kind, image_id: None, timestamp },
+        MessageLine { source, text, kind, image_id: None, timestamp, account },
     ))
+}
+
+/// Extract account from message tags (IRCv3 account-tag). "*" means logged out.
+fn account_from_tags(tags: Option<&Vec<irc::proto::message::Tag>>) -> Option<Option<String>> {
+    let tags = tags?;
+    let v = tags.iter().find(|t| t.0 == "account").and_then(|t| t.1.as_deref())?;
+    Some(if v == "*" { None } else { Some(v.to_string()) })
 }
 
 /// Extract server-time from message tags (IRCv3 server-time). Returns None if absent or parse fails.
@@ -322,9 +360,10 @@ fn message_line(msg: &irc::proto::Message) -> Option<(String, MessageLine)> {
     };
     let target = format_message_target(msg).unwrap_or_else(|| "*server*".to_string());
     let timestamp = server_time_from_tags(msg.tags.as_ref());
+    let account = account_from_tags(msg.tags.as_ref()).unwrap_or(None);
     Some((
         target,
-        MessageLine { source, text, kind, image_id: None, timestamp },
+        MessageLine { source, text, kind, image_id: None, timestamp, account },
     ))
 }
 
@@ -387,13 +426,38 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, our_nick: Op
                     }
                 }
 
+                if let C::CAP(_, CapSubCommand::ACK, multi, params) = &msg.command {
+                    let acked = params.as_deref().or_else(|| multi.as_deref()).unwrap_or("");
+                    let caps: Vec<String> = acked.split_whitespace().map(|c| c.to_lowercase()).collect();
+                    if !caps.is_empty() {
+                        let _ = tx.send(IrcMessage::CapsAcked(caps));
+                    }
+                }
+                if let C::CAP(_, CapSubCommand::NAK, multi, params) = &msg.command {
+                    let nakd = params.as_deref().or_else(|| multi.as_deref()).unwrap_or("");
+                    let caps: Vec<String> = nakd.split_whitespace().map(|c| c.to_lowercase()).collect();
+                    if !caps.is_empty() {
+                        let _ = tx.send(IrcMessage::CapsNak(caps));
+                    }
+                }
+
                 match &msg.command {
                     C::Response(Response::RPL_NAMREPLY, args) => {
                         if args.len() >= 4 {
                             let channel = args[2].clone();
+                            // multi-prefix + userhost-in-names: entries are @%+nick!user@host; parse to prefix+nick for display
                             let nicks: Vec<String> = args[3]
                                 .split_whitespace()
-                                .map(|s| s.to_string())
+                                .map(|s| {
+                                    let s = s.trim();
+                                    let prefix_end = s
+                                        .bytes()
+                                        .take_while(|b| *b == b'@' || *b == b'%' || *b == b'+')
+                                        .count();
+                                    let (prefix, rest) = s.split_at(prefix_end);
+                                    let nick = rest.split('!').next().unwrap_or(rest);
+                                    format!("{}{}", prefix, nick)
+                                })
                                 .collect();
                             pending_users
                                 .entry(channel)
@@ -566,8 +630,19 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, our_nick: Op
                         });
                     }
                     C::Raw(ref cmd, ref args) if cmd.eq_ignore_ascii_case("TAGMSG") => {
-                        if let (Some(target), Some(tags)) = (args.first(), msg.tags.as_ref()) {
-                            let nick = prefix_nick(msg.prefix.as_ref());
+                        let nick = prefix_nick(msg.prefix.as_ref());
+                        let target_opt = args.first();
+                        let tags_opt = msg.tags.as_ref();
+                        if std::env::var("RVIRC_DEBUG_TYPING").is_ok() {
+                            let _ = tx.send(IrcMessage::Status(format!(
+                                "TAGMSG recv: nick={:?} target={:?} tags={:?} prefix={:?}",
+                                nick,
+                                target_opt,
+                                tags_opt.as_ref().map(|t| t.iter().map(|x| format!("{}={:?}", x.0, x.1)).collect::<Vec<_>>().join(",")),
+                                msg.prefix.as_ref().map(|p| format!("{:?}", p))
+                            )));
+                        }
+                        if let (Some(target), Some(tags)) = (target_opt, tags_opt) {
                             for tag in tags.iter() {
                                 if tag.0 == "+typing" {
                                     if let Some(ref status) = tag.1 {
@@ -589,6 +664,7 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, our_nick: Op
                             if tag == "ACTION" {
                                 let source = prefix_nick(msg.prefix.as_ref());
                                 let timestamp = server_time_from_tags(msg.tags.as_ref());
+                                let account = account_from_tags(msg.tags.as_ref()).unwrap_or(None);
                                 let _ = tx.send(IrcMessage::Line {
                                     target: target.clone(),
                                     line: MessageLine {
@@ -597,6 +673,7 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, our_nick: Op
                                         kind: MessageKind::Action,
                                         image_id: None,
                                         timestamp,
+                                        account,
                                     },
                                 });
                             } else if matches!(tag.as_str(), "VERSION" | "PING" | "TIME") {

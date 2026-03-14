@@ -59,6 +59,7 @@ pub enum CommandResult {
     Mute,
     Unmute,
     DebugTyping,
+    Caps,
     NoOp,
     Unknown(String),
 }
@@ -261,6 +262,7 @@ pub fn parse(line: &str) -> CommandResult {
         "version" => CommandResult::Version,
         "credits" => CommandResult::Credits,
         "license" => CommandResult::License,
+        "caps" => CommandResult::Caps,
         "whois" => {
             let nick = rest.split_whitespace().next().unwrap_or("").to_string();
             CommandResult::Whois(nick)

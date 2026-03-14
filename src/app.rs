@@ -40,6 +40,8 @@ pub struct MessageLine {
     pub image_id: Option<usize>,
     /// When the message was received (for display as nick | HH:mm).
     pub timestamp: Option<chrono::DateTime<chrono::Local>>,
+    /// IRCv3 account-tag: account name when sender is logged in (None = not logged in or unknown).
+    pub account: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +90,10 @@ pub struct App {
     /// Selection in input: (start, end) byte indices, start <= end. None means no selection.
     pub input_selection: Option<(usize, usize)>,
 
+    /// IRCv3 caps acked by server (e.g. echo-message, multi-prefix). Used to avoid double-push when echo-message.
+    pub acked_caps: std::collections::HashSet<String>,
+    /// Caps we requested (for :caps display: requested - acked = nakd).
+    pub requested_caps: Vec<String>,
     /// When the app was created; used for rainbow animation phase.
     pub created_at: Instant,
 
@@ -355,6 +361,8 @@ impl App {
             license_popup_visible: false,
             license_popup_scroll_offset: 0,
             message_scroll_offset: 0,
+            acked_caps: HashSet::new(),
+            requested_caps: Vec::new(),
             created_at: Instant::now(),
             pending_auto_join: false,
             auto_join_after: None,
@@ -626,6 +634,7 @@ impl App {
                 kind: MessageKind::Other,
                 image_id: None,
                 timestamp: None,
+                account: None,
             },
         );
     }

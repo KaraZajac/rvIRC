@@ -184,6 +184,7 @@ fn main() -> Result<(), String> {
                             kind: MessageKind::Other,
                             image_id: None,
                             timestamp: None,
+                            account: None,
                         },
                     );
                 }
@@ -378,17 +379,27 @@ fn main() -> Result<(), String> {
 fn send_typing_indicator(app: &mut App, client: &Option<Client>, status: &str) {
     let target = match app.current_channel.as_deref() {
         Some(t) if t != "*server*" => t,
-        _ => return,
+        _ => {
+            if std::env::var("RVIRC_DEBUG_TYPING").is_ok() {
+                app.status_message = "typing skip: no valid target".to_string();
+            }
+            return;
+        }
     };
     let c = match client {
         Some(c) => c,
-        None => return,
+        None => {
+            if std::env::var("RVIRC_DEBUG_TYPING").is_ok() {
+                app.status_message = "typing skip: not connected".to_string();
+            }
+            return;
+        }
     };
     if status == "active" {
         let now = std::time::Instant::now();
         if let Some(&last) = app.last_typing_sent.get(target) {
             if now.duration_since(last).as_secs() < 3 {
-                return;
+                return; // throttle: 3s between active, no status spam
             }
         }
         app.last_typing_sent.insert(target.to_string(), now);
@@ -396,8 +407,17 @@ fn send_typing_indicator(app: &mut App, client: &Option<Client>, status: &str) {
         app.last_typing_sent.remove(target);
     }
     let tags = Some(vec![Tag("+typing".to_string(), Some(status.to_string()))]);
-    if let Ok(msg) = IrcProtoMessage::with_tags(tags, None, "TAGMSG", vec![target]) {
-        let _ = c.send(msg);
+    match IrcProtoMessage::with_tags(tags, None, "TAGMSG", vec![target]) {
+        Ok(msg) => {
+            if let Err(e) = c.send(msg) {
+                app.status_message = format!("typing send error: {}", e);
+            } else if std::env::var("RVIRC_DEBUG_TYPING").is_ok() {
+                app.status_message = format!("typing sent: {} -> {}", target, status);
+            }
+        }
+        Err(e) => {
+            app.status_message = format!("typing build error: {}", e);
+        }
     }
 }
 
@@ -505,11 +525,29 @@ fn apply_irc_message(
             app.status_message = format!("{} invited you to {} (use :join {} to join)", nick, channel, channel);
         }
         M::Typing { nick, target, status } => {
+            if std::env::var("RVIRC_DEBUG_TYPING").is_ok() {
+                app.status_message = format!("typing stored: {} in {} = {}", nick, target, status);
+            }
             if status == "done" {
                 app.typing_status.remove(&(nick, target));
             } else {
                 app.typing_status.insert((nick, target), (status, std::time::Instant::now()));
             }
+        }
+        M::CapRequested(caps) => {
+            app.requested_caps = caps;
+        }
+        M::CapsAcked(caps) => {
+            for c in caps {
+                app.acked_caps.insert(c);
+            }
+            if std::env::var("RVIRC_DEBUG_TYPING").is_ok() {
+                let has_mt = app.acked_caps.contains("message-tags");
+                app.status_message = format!("caps acked: message-tags={} total={}", has_mt, app.acked_caps.len());
+            }
+        }
+        M::CapsNak(_) => {
+            // NAK'd caps stay out of acked_caps; :caps infers from requested - acked
         }
         M::NickInUse | M::CtcpRequest { .. } | M::SendPrivmsg { .. } | M::SendPrivmsgOrEncrypt { .. } | M::Status(_) | M::ChatLog { .. } | M::ImageReady { .. } | M::AnimatedImageReady { .. } | M::TransferProgress { .. } | M::TransferComplete { .. } => {}
         M::MonOnline { nicks } => {
@@ -576,6 +614,8 @@ fn apply_irc_message(
             app.last_invite = None;
             app.friends_online.clear();
             app.friends_away.clear();
+            app.acked_caps.clear();
+            app.requested_caps.clear();
             app.away_message = None;
             app.status_message = "Disconnected.".to_string();
             if let Some(server) = server_for_reconnect {
@@ -1420,7 +1460,9 @@ fn handle_key_action(
                                     app.away_message = None;
                                     app.status_message = "Auto-unaway.".to_string();
                                 }
-                                push_self_message(app, &target, formatted, irc_tx, rt);
+                                if !app.acked_caps.contains("echo-message") {
+                                    push_self_message(app, &target, formatted, irc_tx, rt);
+                                }
                             }
                         } else {
                             for chunk in format::split_message_for_irc(&formatted, format::MAX_MESSAGE_BYTES) {
@@ -1431,7 +1473,9 @@ fn handle_key_action(
                                 app.away_message = None;
                                 app.status_message = "Auto-unaway.".to_string();
                             }
-                            push_self_message(app, &target, formatted, irc_tx, rt);
+                            if !app.acked_caps.contains("echo-message") {
+                                push_self_message(app, &target, formatted, irc_tx, rt);
+                            }
                         }
                     }
                 } else {
@@ -2259,7 +2303,12 @@ fn run_command(
                 .take(3)
                 .map(|((nick, t), (status, _))| format!("{}->{}:{}", nick, t, status))
                 .collect();
-            app.status_message = format!("Typing status ({} entries): {:?}", n, preview);
+            let mt = app.acked_caps.contains("message-tags");
+            let mt_str = if n > 0 && !mt { "ok (inferred)" } else { if mt { "ok" } else { "false" } };
+            app.status_message = format!(
+                "Typing: {} entries {:?} | message-tags={}",
+                n, preview, mt_str
+            );
         }
         R::Version => {
             app.status_message = "rvIRC 1.0.0".to_string();
@@ -2269,6 +2318,29 @@ fn run_command(
         }
         R::License => {
             app.license_popup_visible = true;
+        }
+        R::Caps => {
+            if app.requested_caps.is_empty() {
+                app.status_message = "Not connected or no capabilities negotiated yet.".to_string();
+            } else {
+                let lines: Vec<(String, bool)> = app.requested_caps.iter()
+                    .map(|c| (c.clone(), app.acked_caps.contains(c)))
+                    .collect();
+                for (c, ok) in lines {
+                    app.push_message(
+                        "*server*",
+                        MessageLine {
+                            source: "***".to_string(),
+                            text: format!("{} = {}", c, ok),
+                            kind: MessageKind::Other,
+                            image_id: None,
+                            timestamp: None,
+                            account: None,
+                        },
+                    );
+                }
+                app.status_message = format!("{} capability(ies)", app.requested_caps.len());
+            }
         }
         R::Whois(nick) => {
             let target = if nick.is_empty() {
@@ -2456,7 +2528,7 @@ fn complete_input(app: &mut App) {
         "join", "part", "list", "servers", "connect", "reconnect", "disconnect", "quit", "q", "clear", "invite", "away", "unban", "search",
         "msg", "me", "nick", "topic", "kick", "ban", "channel", "chan", "c",
         "channel-panel", "messages-panel", "user-panel", "friends-panel", "channels", "users",
-        "version", "credits", "license",
+        "version", "credits", "license", "caps",
         "secure", "unsecure", "sendfile",
         "verify", "verified",
     ];
@@ -2535,7 +2607,7 @@ fn push_self_message(
     rt: &tokio::runtime::Runtime,
 ) {
     let nick = app.current_nickname.clone().unwrap_or_else(|| "?".to_string());
-    let mut line = MessageLine { source: nick, text, kind: MessageKind::Privmsg, image_id: None, timestamp: None };
+    let mut line = MessageLine { source: nick, text, kind: MessageKind::Privmsg, image_id: None, timestamp: None, account: None };
     if app.render_images {
         if let Some(url) = extract_image_url(&line.text) {
             line.image_id = Some(app.next_image_id);
@@ -2886,6 +2958,7 @@ fn process_protocol_events(
                                 kind: MessageKind::Privmsg,
                                 image_id: None,
                                 timestamp: None,
+                                account: None,
                             };
                             if app.render_images {
                                 if let Some(url) = extract_image_url(&line.text) {
@@ -2906,6 +2979,7 @@ fn process_protocol_events(
                                     kind: MessageKind::Other,
                                     image_id: None,
                                     timestamp: None,
+                                    account: None,
                                 },
                             );
                         }
@@ -2945,6 +3019,7 @@ fn process_protocol_events(
                             kind: MessageKind::Other,
                             image_id: None,
                             timestamp: None,
+                            account: None,
                         },
                     );
                 }

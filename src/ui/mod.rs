@@ -416,7 +416,9 @@ fn format_message_line_wrapped(
     let mention = current_nick.map_or(false, |nick| {
         !nick.is_empty() && m.text.to_lowercase().contains(&nick.to_lowercase())
     });
+    let account_prefix = m.account.as_ref().map(|a| format!("[{}] ", a)).unwrap_or_default();
     let header_line = Line::from(vec![
+        Span::styled(account_prefix, Style::default().add_modifier(Modifier::DIM)),
         Span::styled(m.source.clone(), header_style),
         Span::raw(" | "),
         Span::styled(time_str, Style::default().add_modifier(Modifier::DIM)),
