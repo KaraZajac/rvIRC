@@ -524,12 +524,27 @@ fn apply_irc_message(
                 app.set_user_list(users);
             }
         }
-        M::ChannelList { server: _server, list } => {
-            let mut list = list;
-            list.sort_by(|a, b| b.1.unwrap_or(0).cmp(&a.1.unwrap_or(0)));
-            app.server_channel_list = list;
-            app.clamp_channel_list_selected_index();
-            app.status_message = format!("{} channels", app.server_channel_list.len());
+        M::ChannelList { server, list } => {
+            let with_server: Vec<_> = list
+                .into_iter()
+                .map(|(ch, count)| (server.clone(), ch, count))
+                .collect();
+            if app.channel_list_super {
+                app.channel_list_pending_servers.remove(&server);
+                app.server_channel_list.extend(with_server);
+                app.server_channel_list
+                    .sort_by(|a, b| b.2.unwrap_or(0).cmp(&a.2.unwrap_or(0)));
+                app.clamp_channel_list_selected_index();
+                if app.channel_list_pending_servers.is_empty() {
+                    app.status_message = format!("{} channels (all servers)", app.server_channel_list.len());
+                }
+            } else {
+                app.server_channel_list = with_server;
+                app.server_channel_list
+                    .sort_by(|a, b| b.2.unwrap_or(0).cmp(&a.2.unwrap_or(0)));
+                app.clamp_channel_list_selected_index();
+                app.status_message = format!("{} channels", app.server_channel_list.len());
+            }
         }
         M::WhoisResult { server: _server, nick, lines } => {
             app.whois_nick = nick;
@@ -650,6 +665,9 @@ fn apply_irc_message(
             app.server_channel_list.clear();
             app.channel_list_filter.clear();
             app.channel_list_scroll_mode = false;
+            app.channel_list_server = None;
+            app.channel_list_super = false;
+            app.channel_list_pending_servers.clear();
             app.server_list_popup_visible = false;
             app.highlight_popup_visible = false;
             app.whois_popup_visible = false;
@@ -1012,23 +1030,24 @@ fn handle_key_action(
             }
         }
         ListPopupSelect => {
-            if let (Some(server), Some(ch)) = (app.current_server.clone(), app.selected_list_channel()) {
+            if let Some((server, ch)) = app.selected_list_channel_and_server() {
                 app.channel_list_popup_visible = false;
                 app.channel_list_filter.clear();
                 app.channel_list_scroll_mode = false;
                 if let Some((ref c, _)) = clients.get(server.as_str()) {
                     c.send_join(&ch).map_err(|e| e.to_string())?;
                     let _ = c.send_topic(&ch, "");
-                    let chans = app.channels_per_server.entry(server.to_string()).or_default();
+                    let chans = app.channels_per_server.entry(server.clone()).or_default();
                     if !chans.contains(&ch) {
                         chans.push(ch.clone());
                     }
                     app.save_current_read_marker();
+                    app.current_server = Some(server.clone());
                     app.current_channel = Some(ch.clone());
                     app.mark_target_read(&server, &ch);
                     app.sync_channel_index_to_current();
                     app.restore_read_marker_for(&server, &ch);
-                    app.status_message = format!("Joined {}", ch);
+                    app.status_message = format!("Joined {} on {}", ch, server);
                 }
             }
         }
@@ -1914,17 +1933,56 @@ fn run_command(
                 }
             }
         }
-        R::List => {
-            if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
+        R::List(server_arg) => {
+            let server = server_arg
+                .as_ref()
+                .and_then(|name| {
+                    app.connected_servers
+                        .iter()
+                        .find(|s| s.eq_ignore_ascii_case(name))
+                        .cloned()
+                })
+                .or_else(|| app.current_server.clone());
+            if let (Some(server_name), Some((ref c, _))) =
+                (server.clone(), server.as_ref().and_then(|s| clients.get(s.as_str())))
+            {
                 let _ = c.send(IrcCommand::LIST(None, None));
                 app.channel_list_popup_visible = true;
                 app.server_channel_list = Vec::new();
                 app.channel_list_filter.clear();
                 app.channel_list_selected_index = 0;
                 app.channel_list_scroll_mode = false;
-                app.status_message = "Fetching channel list...".to_string();
+                app.channel_list_server = Some(server_name.clone());
+                app.channel_list_super = false;
+                app.channel_list_pending_servers.clear();
+                app.status_message = format!("Fetching channel list from {}...", server_name);
+            } else if server_arg.as_ref().is_some() {
+                app.status_message = format!(
+                    "Server not connected. Connected: {}",
+                    app.connected_servers.join(", ")
+                );
             } else {
                 app.status_message = "Not connected.".to_string();
+            }
+        }
+        R::SuperList => {
+            if app.connected_servers.is_empty() {
+                app.status_message = "Not connected.".to_string();
+            } else {
+                for server in &app.connected_servers {
+                    if let Some((ref c, _)) = clients.get(server.as_str()) {
+                        let _ = c.send(IrcCommand::LIST(None, None));
+                    }
+                }
+                app.channel_list_popup_visible = true;
+                app.server_channel_list = Vec::new();
+                app.channel_list_filter.clear();
+                app.channel_list_selected_index = 0;
+                app.channel_list_scroll_mode = false;
+                app.channel_list_server = None;
+                app.channel_list_super = true;
+                app.channel_list_pending_servers = app.connected_servers.iter().cloned().collect();
+                app.status_message = "Fetching channel list from all servers...".to_string();
             }
         }
         R::Servers => {
@@ -2049,6 +2107,9 @@ fn run_command(
                 app.server_channel_list.clear();
                 app.channel_list_filter.clear();
                 app.channel_list_scroll_mode = false;
+                app.channel_list_server = None;
+                app.channel_list_super = false;
+                app.channel_list_pending_servers.clear();
                 app.server_list_popup_visible = false;
                 app.highlight_popup_visible = false;
                 app.whois_popup_visible = false;
@@ -2644,7 +2705,7 @@ fn run_command(
 /// Tab completion: command name only (first word after :).
 fn complete_input(app: &mut App) {
     const COMMANDS: &[&str] = &[
-        "join", "part", "list", "servers", "connect", "reconnect", "disconnect", "quit", "q", "clear", "invite", "away", "unban", "search",
+        "join", "part", "list", "superlist", "servers", "connect", "reconnect", "disconnect", "quit", "q", "clear", "invite", "away", "unban", "search",
         "msg", "me", "nick", "topic", "kick", "ban", "channel", "chan", "c",
         "channel-panel", "messages-panel", "user-panel", "friends-panel", "channels", "users",
         "version", "credits", "license", "caps",

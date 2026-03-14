@@ -8,7 +8,8 @@ pub enum CommandResult {
     SendPrivmsg { target: String, text: String },
     Join { channel: String, key: Option<String> },
     Part(Option<String>),
-    List,
+    List(Option<String>),  // None = current server, Some(name) = specific connected server
+    SuperList,
     Servers,
     Connect(String),
     Reconnect,
@@ -91,7 +92,19 @@ pub fn parse(line: &str) -> CommandResult {
             let ch = rest.split_whitespace().next().map(String::from);
             CommandResult::Part(ch)
         }
-        "list" => CommandResult::List,
+        "list" => {
+            let server = rest.split_whitespace().next().map(str::trim);
+            if let Some(s) = server {
+                if !s.is_empty() {
+                    CommandResult::List(Some(s.to_string()))
+                } else {
+                    CommandResult::List(None)
+                }
+            } else {
+                CommandResult::List(None)
+            }
+        }
+        "superlist" => CommandResult::SuperList,
         "servers" => CommandResult::Servers,
         "connect" | "server" => {
             let name = rest.split_whitespace().next().unwrap_or("").to_string();

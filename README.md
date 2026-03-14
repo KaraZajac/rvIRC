@@ -23,6 +23,7 @@
 | **Message area** | Wrap, auto-scroll, k/j or Page Up/Down for history |
 | **Images in terminal** | Inline display of image links in chat via [ratatui-image](https://crates.io/crates/ratatui-image) (Sixel, Kitty, iTerm2). Animated GIFs in channels, DMs, encrypted DMs |
 | **Notifications** | Desktop notifications and optional sound for unviewed buffers. Config `notifications` and `sounds`; `:notifications on|off` and `:mute` / `:unmute` |
+| **Superlist** | `:superlist` fetches channel list from all connected servers and shows one combined window |
 | **IRC formatting** | Bold, italic, strikethrough, colors. `*italic*`, `**bold**`, `~~strikethrough~~`, `||spoiler||`, `:colorname:` — compatible with [IRC format codes](https://modern.ircdocs.horse/formatting) |
 | **rvIRC effects** | `@@text@@` = animated rainbow; `$$text$$` = scared (flicker) — sent as literal text, only rvIRC renders |
 | **IRC: away-notify** | Friends list away status (yellow vs green) |
@@ -51,7 +52,8 @@ Type `:` to enter COMMAND mode, then run any of these (case-insensitive):
 | `reconnect` | Reconnect to the current server |
 | `join #channel [key]` | Join a channel (`#` added if omitted); optional key for keyed channels |
 | `part` / `leave` | Part current channel or close current DM; `part #chan` parts a channel, `part nick` closes a DM window |
-| `list` | Fetch and show channel list (popup); type to filter, Enter to join |
+| `list` [server] | Fetch channel list from current server, or from `server` if given (e.g. `:list Libera`). Type to filter, Enter to join |
+| `superlist` | Fetch channel list from all connected servers and show one combined window |
 | `msg <nick> <text>` / `query` | Send a private message |
 | `me <action text>` | Send an action (/me) to the current channel or DM |
 | `nick <newnick>` | Change your nickname |
@@ -148,7 +150,7 @@ Panels can be hidden independently with `:channel-panel hide`, `:messages-panel 
 ### Popups
 
 - **:servers** — j/k or arrows to move, **Enter** to connect, **Esc** to close.
-- **:list** — Type to filter; **Enter** to toggle “scroll mode” then j/k + Enter to join; **Esc** to close.
+- **:list** / **:superlist** — Type to filter; **Enter** to toggle "scroll mode" then j/k + Enter to join; **Esc** to close. Superlist shows channels from all connected servers.
 - **:search** — Type to filter messages; **Enter** to browse list, then j/k + Enter to jump to message; **Esc** to close.
 - **Whois** — **Esc** or **Enter** or **q** to close.
 - **:credits** — **Esc** or **Enter** or **q** to close.

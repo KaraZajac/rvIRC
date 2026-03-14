@@ -708,7 +708,10 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, server: Stri
                                 }
                             }
                             C::PART(chan, _) => {
-                                let _ = tx.send(IrcMessage::PartedChannel { server: server.clone(), channel: chan.clone() });
+                                // Only remove channel from our list when *we* part, not when others part
+                                if our_nick.as_deref() == Some(prefix_nick(msg.prefix.as_ref()).as_str()) {
+                                    let _ = tx.send(IrcMessage::PartedChannel { server: server.clone(), channel: chan.clone() });
+                                }
                             }
                             _ => {}
                         }

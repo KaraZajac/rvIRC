@@ -891,9 +891,14 @@ fn draw_channel_list_popup(f: &mut Frame, area: Rect, app: &App) {
         .split(popup_rect);
 
     let filtered = app.filtered_server_channel_list();
+    let show_server = app.channel_list_super;
     let list_items: Vec<ListItem> = if filtered.is_empty() {
-        let msg = if app.server_channel_list.is_empty() {
+        let msg = if app.server_channel_list.is_empty()
+            && app.channel_list_pending_servers.is_empty()
+        {
             "Loading..."
+        } else if app.server_channel_list.is_empty() {
+            "Fetching from all servers..."
         } else {
             "No channels match filter"
         };
@@ -902,10 +907,17 @@ fn draw_channel_list_popup(f: &mut Frame, area: Rect, app: &App) {
         filtered
             .iter()
             .enumerate()
-            .map(|(i, (name, count))| {
-                let label = match count {
-                    Some(n) => format!("{} ({})", name, n),
-                    None => name.clone(),
+            .map(|(i, (server, channel, count))| {
+                let label = if show_server {
+                    match count {
+                        Some(n) => format!("{} {} ({})", server, channel, n),
+                        None => format!("{} {}", server, channel),
+                    }
+                } else {
+                    match count {
+                        Some(n) => format!("{} ({})", channel, n),
+                        None => channel.clone(),
+                    }
                 };
                 let line = if i == app.channel_list_selected_index {
                     format!("> {}  ", label)
@@ -930,9 +942,14 @@ fn draw_channel_list_popup(f: &mut Frame, area: Rect, app: &App) {
 
     f.render_widget(Clear, popup_rect);
     let popup_style = popup_overlay_style();
+    let title = if app.channel_list_super {
+        " Channel list (all servers) "
+    } else {
+        " Channel list "
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Channel list ")
+        .title(title)
         .style(popup_style);
     f.render_widget(block, popup_rect);
 

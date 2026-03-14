@@ -142,13 +142,19 @@ pub struct App {
     pub search_scroll_mode: bool,
 
     /// :list popup: server channel list (from LIST command), filter, selection.
-    /// Each entry is (channel name, optional user count).
+    /// Each entry is (server, channel name, optional user count).
     pub channel_list_popup_visible: bool,
-    pub server_channel_list: Vec<(String, Option<u32>)>,
+    pub server_channel_list: Vec<(String, String, Option<u32>)>,
     pub channel_list_filter: String,
     pub channel_list_selected_index: usize,
     /// false = filter mode (type to search), true = scroll mode (j/k/arrows move, Enter joins).
     pub channel_list_scroll_mode: bool,
+    /// For :list: server we listed (used when joining). For :superlist: None (server in each entry).
+    pub channel_list_server: Option<String>,
+    /// true = :superlist mode (append ChannelList from each server). false = :list (replace).
+    pub channel_list_super: bool,
+    /// For :superlist: servers we're still waiting for LIST response.
+    pub channel_list_pending_servers: std::collections::HashSet<String>,
 
     /// :servers popup: list of server names from config, select one to connect.
     pub server_list_popup_visible: bool,
@@ -367,6 +373,9 @@ impl App {
             channel_list_filter: String::new(),
             channel_list_selected_index: 0,
             channel_list_scroll_mode: false,
+            channel_list_server: None,
+            channel_list_super: false,
+            channel_list_pending_servers: std::collections::HashSet::new(),
             server_list_popup_visible: false,
             server_list: Vec::new(),
             server_list_selected_index: 0,
@@ -502,15 +511,17 @@ impl App {
             .collect()
     }
 
-    /// Filtered server channel list for the :list popup (substring match on name, case-insensitive).
-    pub fn filtered_server_channel_list(&self) -> Vec<(String, Option<u32>)> {
+    /// Filtered server channel list for the :list popup (substring match on channel or server, case-insensitive).
+    pub fn filtered_server_channel_list(&self) -> Vec<(String, String, Option<u32>)> {
         let q = self.channel_list_filter.to_lowercase();
         if q.is_empty() {
             return self.server_channel_list.clone();
         }
         self.server_channel_list
             .iter()
-            .filter(|(name, _)| name.to_lowercase().contains(&q))
+            .filter(|(server, channel, _)| {
+                server.to_lowercase().contains(&q) || channel.to_lowercase().contains(&q)
+            })
             .cloned()
             .collect()
     }
@@ -525,10 +536,12 @@ impl App {
         }
     }
 
-    /// Selected channel name in the list popup (from filtered list), if any.
-    pub fn selected_list_channel(&self) -> Option<String> {
+    /// Selected (server, channel) in the list popup (from filtered list), for joining.
+    pub fn selected_list_channel_and_server(&self) -> Option<(String, String)> {
         let filtered = self.filtered_server_channel_list();
-        filtered.get(self.channel_list_selected_index).map(|(name, _)| name.clone())
+        filtered
+            .get(self.channel_list_selected_index)
+            .map(|(server, channel, _)| (server.clone(), channel.clone()))
     }
 
     /// Clamp server_list_selected_index to server_list length.
