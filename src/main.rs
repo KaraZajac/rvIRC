@@ -3765,26 +3765,34 @@ fn process_protocol_events(
                 if let Some(session) = app.secure_sessions.get_mut(&sec_key) {
                     match session.decrypt(&nonce_b64, &ciphertext_b64) {
                         Ok(plaintext) => {
-                            let mut line = MessageLine {
-                                source: from_nick.clone(),
-                                text: plaintext,
-                                kind: MessageKind::Privmsg,
-                                image_id: None,
-                                timestamp: None,
-                                account: None,
-                                msgid: None,
-                                reply_to_msgid: None,
-                            is_bot_sender: false,
-                            };
-                            if app.render_images {
-                                if let Some(url) = extract_image_url(&line.text) {
-                                    let image_id = app.next_image_id;
-                                    app.next_image_id += 1;
-                                    line.image_id = Some(image_id);
-                                    spawn_image_download(url, image_id, irc_tx, rt);
+                            // Decrypted content may be rvIRC protocol (e.g. WORMHOLE:OFFER sent over secure)
+                            if plaintext.starts_with("[:rvIRC:") {
+                                if let Some(evt) = parse_rvirc_protocol(&from_nick, &plaintext) {
+                                    app.protocol_events.push(evt);
                                 }
+                                // Don't push raw protocol string - handler will push_chat_log or show popup
+                            } else {
+                                let mut line = MessageLine {
+                                    source: from_nick.clone(),
+                                    text: plaintext,
+                                    kind: MessageKind::Privmsg,
+                                    image_id: None,
+                                    timestamp: None,
+                                    account: None,
+                                    msgid: None,
+                                    reply_to_msgid: None,
+                                    is_bot_sender: false,
+                                };
+                                if app.render_images {
+                                    if let Some(url) = extract_image_url(&line.text) {
+                                        let image_id = app.next_image_id;
+                                        app.next_image_id += 1;
+                                        line.image_id = Some(image_id);
+                                        spawn_image_download(url, image_id, irc_tx, rt);
+                                    }
+                                }
+                                app.push_message(&server, &from_nick, line);
                             }
-                            app.push_message(&server, &from_nick, line);
                         }
                         Err(e) => {
                             app.push_message(
