@@ -10,6 +10,20 @@ struct FriendsFile {
     servers: HashMap<String, Vec<String>>,
 }
 
+/// Load friends for all servers from file. Returns empty map if file missing.
+pub fn load_all_friends(path: &Path) -> HashMap<String, Vec<String>> {
+    if !path.exists() {
+        return HashMap::new();
+    }
+    let Ok(s) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    let Ok(data) = toml::from_str::<FriendsFile>(&s) else {
+        return HashMap::new();
+    };
+    data.servers
+}
+
 /// Load friends list for the given server. Returns empty vec if file missing or server not found.
 pub fn load_friends(path: &Path, server: Option<&str>) -> Vec<String> {
     let server = match server {

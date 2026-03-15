@@ -56,7 +56,8 @@ fn main() -> Result<(), String> {
         app.known_keys = KnownKeys::load(&known_keys_path);
         app.known_keys_path = Some(known_keys_path);
         let friends_path = config_dir.join("friends.toml");
-        app.friends_path = Some(friends_path);
+        app.friends_path = Some(friends_path.clone());
+        app.friends_per_server = crate::friends::load_all_friends(&friends_path);
         let highlight_path = config_dir.join("highlight.toml");
         app.highlight_path = Some(highlight_path.clone());
         app.highlight_words = crate::highlight::load_highlights(&highlight_path);
@@ -343,7 +344,7 @@ fn main() -> Result<(), String> {
             apply_irc_message(&mut app, msg, &irc_tx, &rt);
             if let Some(server) = connected_server {
                 if let Some((ref c, _)) = clients.get(server.as_str()) {
-                    for nick in &app.friends_list {
+                    for nick in app.friends_per_server.get(&server).into_iter().flatten() {
                         let _ = c.send(IrcCommand::MONITOR("+".to_string(), Some(nick.clone())));
                     }
                 }
@@ -554,12 +555,13 @@ fn apply_irc_message(
                 app.bot_per_nick.insert((server.clone(), line.source.to_lowercase()));
             }
             if line.text.starts_with("[:rvIRC:") {
-                if let Some(evt) = parse_rvirc_protocol(&line.source, &line.text) {
-                    app.protocol_events.push(evt);
-                }
-                // Don't add our own nick to dm_targets (e.g. echo of our SECURE:ACK creates a self-DM)
+                // Don't process our own echoed rvIRC messages (echo-message cap) - they would show
+                // the secure accept popup with our nick and open a self-DM
                 let is_self = app.current_nickname.as_ref().map_or(false, |n| n.eq_ignore_ascii_case(&line.source));
                 if !is_self {
+                    if let Some(evt) = parse_rvirc_protocol(&line.source, &line.text) {
+                        app.protocol_events.push(evt);
+                    }
                     let dms = app.dm_targets_per_server.entry(server.to_string()).or_default();
                     if !dms.contains(&line.source) {
                         dms.push(line.source.clone());
@@ -745,7 +747,7 @@ fn apply_irc_message(
             app.clamp_friends_index();
         }
         M::FriendAway { server: _server, nick, away } => {
-            if app.friends_list.iter().any(|n| n.eq_ignore_ascii_case(&nick)) {
+            if app.is_friend(&nick) {
                 if let Some(existing) = app.friends_away.iter().find(|a| a.eq_ignore_ascii_case(&nick)).cloned() {
                     app.friends_away.remove(&existing);
                 }
@@ -774,7 +776,8 @@ fn apply_irc_message(
             app.friends_online.clear();
             app.friends_away.clear();
             if let Some(ref path) = app.friends_path {
-                app.friends_list = friends::load_friends(path, Some(&server));
+                let loaded = friends::load_friends(path, Some(&server));
+                app.friends_per_server.insert(server.clone(), loaded);
                 app.friends_index = 0;
                 app.clamp_friends_index();
             }
@@ -2932,34 +2935,46 @@ fn run_command(
             let nick = nick.trim().to_string();
             if nick.is_empty() {
                 app.status_message = "Usage: :add-friend <nick>".to_string();
-            } else if app.friends_list.iter().any(|n| n.eq_ignore_ascii_case(&nick)) {
-                app.status_message = format!("{} is already a friend.", nick);
+            } else if let Some(server) = app.current_server.as_deref() {
+                let friends = app.friends_per_server.entry(server.to_string()).or_default();
+                if friends.iter().any(|n| n.eq_ignore_ascii_case(&nick)) {
+                    app.status_message = format!("{} is already a friend.", nick);
+                } else {
+                    friends.push(nick.clone());
+                    friends.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+                    let to_save = friends.clone();
+                    if let Some((ref c, _)) = clients.get(server) {
+                        let _ = c.send(IrcCommand::MONITOR("+".to_string(), Some(nick.clone())));
+                    }
+                    if let Some(ref path) = app.friends_path {
+                        let _ = crate::friends::save_friends(path, Some(server), &to_save);
+                    }
+                    app.clamp_friends_index();
+                    app.status_message = format!("Added {} to friends.", nick);
+                }
             } else {
-                app.friends_list.push(nick.clone());
-                app.friends_list.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
-                app.clamp_friends_index();
-                if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
-                    let _ = c.send(IrcCommand::MONITOR("+".to_string(), Some(nick.clone())));
-                }
-                if let Some(ref path) = app.friends_path {
-                    let _ = crate::friends::save_friends(path, app.current_server.as_deref(), &app.friends_list);
-                }
-                app.status_message = format!("Added {} to friends.", nick);
+                app.status_message = "Not connected.".to_string();
             }
         }
         R::RemoveFriend(nick) => {
             let nick = nick.trim();
-            if let Some(pos) = app.friends_list.iter().position(|n| n.eq_ignore_ascii_case(nick)) {
-                app.friends_list.remove(pos);
-                app.clamp_friends_index();
-                if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
-                    let _ = c.send(IrcCommand::MONITOR("-".to_string(), Some(nick.to_string())));
+            let mut removed = false;
+            for (server, friends) in app.friends_per_server.iter_mut() {
+                if let Some(pos) = friends.iter().position(|n| n.eq_ignore_ascii_case(nick)) {
+                    friends.remove(pos);
+                    removed = true;
+                    if let Some((ref c, _)) = clients.get(server.as_str()) {
+                        let _ = c.send(IrcCommand::MONITOR("-".to_string(), Some(nick.to_string())));
+                    }
+                    if let Some(ref path) = app.friends_path {
+                        let _ = crate::friends::save_friends(path, Some(server), friends);
+                    }
                 }
+            }
+            if removed {
                 app.friends_online.remove(nick);
                 app.friends_away.remove(nick);
-                if let Some(ref path) = app.friends_path {
-                    let _ = crate::friends::save_friends(path, app.current_server.as_deref(), &app.friends_list);
-                }
+                app.clamp_friends_index();
                 app.status_message = format!("Removed {} from friends.", nick);
             } else {
                 app.status_message = format!("{} is not in friends list.", nick);

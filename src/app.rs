@@ -124,8 +124,8 @@ pub struct App {
     pub user_list_filter_focused: bool,
     pub user_action_menu: bool,
     pub user_action_index: usize,
-    /// Friends list (MONITOR targets). Persisted per server.
-    pub friends_list: Vec<String>,
+    /// Friends list per server (MONITOR targets). Persisted in friends.toml.
+    pub friends_per_server: HashMap<String, Vec<String>>,
     /// Friends currently online (from RPL_MONONLINE/731).
     pub friends_online: HashSet<String>,
     /// Friends currently away (from away-notify AWAY; only for friends in friends_list).
@@ -383,7 +383,7 @@ impl App {
             user_list_filter_focused: false,
             user_action_menu: false,
             user_action_index: 0,
-            friends_list: Vec::new(),
+            friends_per_server: HashMap::new(),
             friends_online: HashSet::new(),
             friends_away: HashSet::new(),
             friends_index: 0,
@@ -1017,22 +1017,45 @@ impl App {
         }
     }
 
+    /// All friends from all connected servers, deduped and sorted.
+    fn all_friends_sorted(&self) -> Vec<String> {
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for server in &self.connected_servers {
+            if let Some(friends) = self.friends_per_server.get(server) {
+                for n in friends {
+                    if seen.insert(n.to_lowercase()) {
+                        out.push(n.clone());
+                    }
+                }
+            }
+        }
+        out.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+        out
+    }
+
     /// Friends list filtered by offline_friends: hide = only online, show = all.
     pub fn visible_friends(&self) -> Vec<String> {
+        let all = self.all_friends_sorted();
         let hide = self
             .offline_friends
             .as_deref()
             .map(|s| s.eq_ignore_ascii_case("hide"))
             .unwrap_or(false);
         if hide {
-            self.friends_list
-                .iter()
+            all.into_iter()
                 .filter(|n| self.friends_online.iter().any(|o| o.eq_ignore_ascii_case(n)))
-                .cloned()
                 .collect()
         } else {
-            self.friends_list.clone()
+            all
         }
+    }
+
+    /// True if nick is a friend on any server.
+    pub fn is_friend(&self, nick: &str) -> bool {
+        self.friends_per_server
+            .values()
+            .any(|v| v.iter().any(|n| n.eq_ignore_ascii_case(nick)))
     }
 
     /// Friend status for display: (online, away).
