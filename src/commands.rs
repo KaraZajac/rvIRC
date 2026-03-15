@@ -65,6 +65,10 @@ pub enum CommandResult {
     Unmute,
     DebugTyping,
     Caps,
+    /// Identify with a service (NickServ, AuthServ, etc.). :pass <password> or :pass <service> <password>
+    Pass { service: Option<String>, password: String },
+    /// Send raw IRC command. :raw PRIVMSG NickServ :IDENTIFY mypass
+    Raw(String),
     NoOp,
     Unknown(String),
 }
@@ -284,6 +288,26 @@ pub fn parse(line: &str) -> CommandResult {
         "credits" => CommandResult::Credits,
         "license" => CommandResult::License,
         "caps" => CommandResult::Caps,
+        "pass" => {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if parts.is_empty() {
+                CommandResult::StatusMessage("Usage: :pass <password> or :pass <service> <password>".to_string())
+            } else if parts.len() == 1 {
+                CommandResult::Pass { service: None, password: parts[0].to_string() }
+            } else {
+                CommandResult::Pass {
+                    service: Some(parts[0].to_string()),
+                    password: parts[1..].join(" "),
+                }
+            }
+        }
+        "raw" => {
+            if rest.trim().is_empty() {
+                CommandResult::StatusMessage("Usage: :raw <IRC command> (e.g. :raw PRIVMSG NickServ :IDENTIFY pass)".to_string())
+            } else {
+                CommandResult::Raw(rest.trim().to_string())
+            }
+        }
         "whois" => {
             let nick = rest.split_whitespace().next().unwrap_or("").to_string();
             CommandResult::Whois(nick)

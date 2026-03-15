@@ -1829,8 +1829,13 @@ fn handle_key_action(
                 app.input.clear();
                 app.input_cursor = 0;
                 app.input_selection = None;
-                if text.starts_with(':') {
-                    if run_command(app, clients, config, irc_tx, rt, &sts_policies, &sts_path, &text)? {
+                if text.starts_with(':') || text.starts_with('/') {
+                    let cmd_line = if text.starts_with(':') {
+                        text.clone()
+                    } else {
+                        format!(":{}", &text[1..])
+                    };
+                    if run_command(app, clients, config, irc_tx, rt, &sts_policies, &sts_path, &cmd_line)? {
                         return Ok(true);
                     }
                 } else if let (Some(server), Some((ref c, _))) = (app.current_server.clone(), app.current_server.as_ref().and_then(|s| clients.get(s.as_str()))) {
@@ -2155,6 +2160,33 @@ fn handle_key_action(
 }
 
 /// Returns Ok(true) if the program should exit (e.g. after :quit / :q).
+/// Parse a raw IRC line into (command, args). Handles :trailing (e.g. "PRIVMSG NickServ :IDENTIFY pass").
+fn parse_raw_irc_line(line: &str) -> (String, Vec<String>) {
+    let line = line.trim();
+    let mut words: Vec<&str> = line.split_whitespace().collect();
+    if words.is_empty() {
+        return (String::new(), vec![]);
+    }
+    let cmd = words.remove(0).to_uppercase();
+    let mut args: Vec<String> = vec![];
+    let mut i = 0;
+    while i < words.len() {
+        if words[i].starts_with(':') {
+            let rest = words[i + 1..].join(" ");
+            let trailing = if rest.is_empty() {
+                words[i][1..].to_string()
+            } else {
+                format!("{} {}", &words[i][1..], rest)
+            };
+            args.push(trailing);
+            break;
+        }
+        args.push(words[i].to_string());
+        i += 1;
+    }
+    (cmd, args)
+}
+
 fn run_command(
     app: &mut App,
     clients: &mut HashMap<String, (Client, tokio::task::JoinHandle<()>)>,
@@ -2987,6 +3019,30 @@ fn run_command(
                 app.status_message = "Not connected.".to_string();
             }
         }
+        R::Pass { service, password } => {
+            let service = service.as_deref().unwrap_or("NickServ");
+            if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
+                let msg = format!("IDENTIFY {}", password);
+                c.send_privmsg(service, &msg).map_err(|e| e.to_string())?;
+                app.status_message = format!("Identifying with {}...", service).to_string();
+            } else {
+                app.status_message = "Not connected.".to_string();
+            }
+        }
+        R::Raw(line) => {
+            let (cmd, args) = parse_raw_irc_line(&line);
+            if cmd.is_empty() {
+                app.status_message = "Usage: :raw <IRC command>".to_string();
+            } else if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
+                if let Err(e) = c.send(IrcCommand::Raw(cmd.to_string(), args)) {
+                    app.status_message = format!("Raw send failed: {}", e);
+                } else {
+                    app.status_message = format!("Sent: {}", line).to_string();
+                }
+            } else {
+                app.status_message = "Not connected.".to_string();
+            }
+        }
         R::Whois(nick) => {
             let target = if nick.is_empty() {
                 app.current_channel.as_ref().and_then(|c| {
@@ -3189,7 +3245,7 @@ fn complete_input(app: &mut App) {
         "join", "part", "list", "superlist", "servers", "connect", "reconnect", "disconnect", "quit", "q", "clear", "invite", "away", "unban", "search",
         "msg", "me", "nick", "topic", "kick", "ban", "channel", "chan", "c",
         "channel-panel", "messages-panel", "user-panel", "friends-panel", "channels", "users",
-        "version", "credits", "license", "caps",
+        "version", "credits", "license", "caps", "pass", "raw",
         "secure", "unsecure", "sendfile",
         "verify", "verified",
     ];

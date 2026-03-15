@@ -13,7 +13,7 @@
 | Capability | Description |
 |------------|-------------|
 | **Vim-style modes** | NORMAL, INSERT, COMMAND with distinct status bar colors (blue, green, orange) |
-| **Commands** | `:connect`, `:servers`, `:join`, `:list`, `:part`, `:msg`, `:quit`, and more (see below) |
+| **Commands** | `:connect`, `:servers`, `:join`, `:list`, `:part`, `:msg`, `:quit`, `:pass`, `:raw`, and more (see below). Use `:` or `/` in input bar |
 | **Panes** | Channels and messages (left), users and friends (right). Toggle with `c` / `m` / `u` / `f`; j/k or arrows + Enter to switch channel, open DM, or run user actions |
 | **Friends list** | Track nicks with `:add-friend` / `:remove-friend`. Names colored by status (green = online, yellow = away, red = offline). Uses IRC MONITOR and away-notify. Config `offline_friends = "hide"` omits offline friends |
 | **Config** | `~/.config/rvIRC/config.toml` — multiple servers, nickname, optional NickServ identify and auto-join. Per-server auto-connect and auto_join |
@@ -51,7 +51,7 @@ cargo build --release
 
 ## Commands
 
-Type `:` to enter COMMAND mode, then run any of these (case-insensitive):
+Type `:` to enter COMMAND mode, or `/` in the input bar (e.g. `/pass xyz`), then run any of these (case-insensitive):
 
 | Command | Description |
 |--------|-------------|
@@ -72,6 +72,8 @@ Type `:` to enter COMMAND mode, then run any of these (case-insensitive):
 | `ban [channel] <mask>` | Set ban mask on channel (e.g. `*!*@host` or `nick!*@*`) |
 | `unban [channel] <mask>` | Remove ban mask |
 | `away [message]` | Set away status; no message clears it |
+| `pass <password>` / `pass <service> <password>` | Identify with NickServ (default) or another service (e.g. AuthServ) |
+| `raw <IRC command>` | Send raw IRC command (e.g. `:raw PRIVMSG NickServ :IDENTIFY pass`) |
 | `reply` | Reply to last message with msgid (press `i` to type, Enter to send) |
 | `more` / `history` | Fetch older messages in current channel/DM (CHATHISTORY BEFORE) |
 | `notifications on` / `off` | Enable or disable desktop notifications |
