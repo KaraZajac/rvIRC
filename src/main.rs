@@ -2636,11 +2636,18 @@ fn run_command(
             }
         }
         R::Me(text) => {
-            if let (Some((ref c, _)), Some(ref target)) = (app.current_server.as_ref().and_then(|s| clients.get(s)), app.current_channel.as_ref()) {
+            let server_opt = app.current_server.clone();
+            let target_opt = app.current_channel.clone();
+            if let (Some(ref server), Some((ref c, _)), Some(ref target)) = (
+                &server_opt,
+                server_opt.as_ref().and_then(|s| clients.get(s)),
+                &target_opt,
+            ) {
                 if target.as_str() == "*server*" {
                     app.status_message = "Cannot /me to server.".to_string();
                 } else if !text.is_empty() {
                     c.send_action(target, &text).map_err(|e| e.to_string())?;
+                    push_self_action(app, server, target, text.clone());
                 }
             } else {
                 app.status_message = "Not connected.".to_string();
@@ -3402,6 +3409,24 @@ fn restore_terminal() -> io::Result<()> {
 
 const IMAGE_EXTS: &[&str] = &[".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"];
 const MAX_GIF_FRAMES: usize = 100;
+
+/// Push a self-sent /me action to the chat log. Sender sees their own action.
+fn push_self_action(app: &mut App, server: &str, target: &str, text: String) {
+    let nick = app.current_nickname.clone().unwrap_or_else(|| "?".to_string());
+    let line = MessageLine {
+        source: nick,
+        text,
+        kind: MessageKind::Action,
+        image_id: None,
+        timestamp: None,
+        account: None,
+        msgid: None,
+        reply_to_msgid: None,
+        is_bot_sender: false,
+    };
+    app.record_recent_send(server, target, &line.text);
+    app.push_message(server, target, line);
+}
 
 /// Push a self-sent message to the chat log and spawn image download if the text
 /// contains an image URL. Sender sees their own images inline.

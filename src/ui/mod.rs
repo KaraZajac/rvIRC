@@ -2,7 +2,7 @@
 
 mod layout;
 
-use crate::app::{App, MessageLine, Mode, PanelFocus, UserAction};
+use crate::app::{App, MessageKind, MessageLine, Mode, PanelFocus, UserAction};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -490,6 +490,12 @@ fn format_message_line_wrapped(
         }
     }
     msg_spans = crate::format::apply_highlights_to_spans(msg_spans, &highlight_words);
+    // CTCP ACTION (/me): render body in italics
+    if m.kind == MessageKind::Action {
+        msg_spans = msg_spans.into_iter()
+            .map(|s| Span::styled(s.content, s.style.add_modifier(Modifier::ITALIC)))
+            .collect();
+    }
     let w = width as usize;
     let msg_lines = crate::format::wrap_spans(&msg_spans, w);
     let mut all_lines = vec![header_line];

@@ -3,10 +3,22 @@
 use crate::connection::IrcMessage;
 use futures_util::io::AllowStdIo;
 use std::sync::atomic::{AtomicU64, Ordering};
-use magic_wormhole::transit::Abilities;
+use magic_wormhole::transit::{Abilities, RelayHint};
 use magic_wormhole::{transfer, MailboxConnection, Wormhole};
 use std::path::Path;
 use tokio::sync::mpsc;
+
+/// Abilities::ALL: try direct TCP first, fall back to relay. Both sides must support
+/// at least one common method.
+const TRANSIT_ABILITIES: Abilities = Abilities::ALL;
+
+/// Default relay for when both parties are behind NAT. Without this, transit fails.
+fn default_relay_hints() -> Vec<RelayHint> {
+    vec![
+        RelayHint::from_urls(None, [magic_wormhole::transit::DEFAULT_RELAY_SERVER.parse().unwrap()])
+            .expect("DEFAULT_RELAY_SERVER is valid"),
+    ]
+}
 
 /// Send a file via magic wormhole. Sends the OFFER to the recipient as soon as
 /// the wormhole code is available (before blocking on the transfer).
@@ -92,11 +104,11 @@ pub async fn send_file(
         #[allow(deprecated)]
         transfer::send_file(
             wormhole,
-            vec![],
+            default_relay_hints(),
             &mut reader,
             file_name.clone(),
             file_size,
-            Abilities::ALL,
+            TRANSIT_ABILITIES,
             |_info| {},
             progress,
             futures_util::future::pending(),
@@ -161,8 +173,8 @@ pub async fn receive_file(
 
     let req = transfer::request_file(
         wormhole,
-        vec![],
-        Abilities::ALL,
+        default_relay_hints(),
+        TRANSIT_ABILITIES,
         futures_util::future::pending(),
     )
     .await
