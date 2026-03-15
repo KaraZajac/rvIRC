@@ -1,5 +1,7 @@
 # rvIRC
 
+> ⚠️ **Active development** — This project is under active development. APIs, behavior, and features may change. Use at your own risk.
+
 **Rust + VIM + IRC** — A terminal IRC client with vim-style modes and commands, built with [ratatui](https://ratatui.rs/) and the [irc](https://crates.io/crates/irc) crate.
 
 ![rvIRC](images/rvirc.png)
