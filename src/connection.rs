@@ -225,7 +225,7 @@ pub fn connect(
         // Space CAP REQs to avoid Excess Flood (Libera and others rate-limit).
         for (i, cap) in caps.iter().enumerate() {
             if i > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
             }
             let _ = client.send_cap_req(std::slice::from_ref(cap));
         }

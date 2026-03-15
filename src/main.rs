@@ -456,7 +456,7 @@ fn main() -> Result<(), String> {
         let key_action = if let Ok(true) = event {
             crossterm::event::read()
                 .ok()
-                .and_then(|ev| handle_key(ev, app.mode, app.panel_focus, app.channel_panel_visible, app.messages_panel_visible, app.user_panel_visible, app.friends_panel_visible, app.user_action_menu, app.channel_list_popup_visible, app.channel_list_scroll_mode, app.search_popup_visible, app.search_scroll_mode, app.server_list_popup_visible, app.whois_popup_visible, app.credits_popup_visible, app.license_popup_visible, app.file_receive_popup_visible, app.file_browser_visible, app.secure_accept_popup_visible, app.highlight_popup_visible, app.away_popup_visible))
+                .and_then(|ev| handle_key(ev, app.mode, app.panel_focus, app.reply_select_mode, app.channel_panel_visible, app.messages_panel_visible, app.user_panel_visible, app.friends_panel_visible, app.user_action_menu, app.channel_list_popup_visible, app.channel_list_scroll_mode, app.search_popup_visible, app.search_scroll_mode, app.server_list_popup_visible, app.whois_popup_visible, app.credits_popup_visible, app.license_popup_visible, app.file_receive_popup_visible, app.file_browser_visible, app.secure_accept_popup_visible, app.highlight_popup_visible, app.away_popup_visible, app.user_list_filter_focused))
         } else {
             None
         };
@@ -570,6 +570,12 @@ fn apply_irc_message(
                     line.image_id = Some(image_id);
                     spawn_image_download(url, image_id, irc_tx, rt);
                 }
+            }
+            // Skip echoed self-messages when we have echo-message: we already showed our message via push_self_message with correct reply_to.
+            let is_echo_from_us = app.current_nickname.as_ref().map_or(false, |n| line.source.eq_ignore_ascii_case(n));
+            let has_echo = app.acked_caps_per_server.get(&server).map_or(false, |s| s.contains("echo-message"));
+            if is_echo_from_us && has_echo {
+                return;
             }
             let (effective_target, source, text) = if target == app.current_nickname.as_deref().unwrap_or("") {
                 let dms = app.dm_targets_per_server.entry(server.to_string()).or_default();
@@ -913,23 +919,28 @@ fn handle_key_action(
             }
         }
         Reply => {
-            // Set reply_to_msgid from last message with msgid; switch to Insert.
-            let target_key = app::msg_key(
-                app.current_server.as_deref().unwrap_or(""),
-                app.current_channel.as_deref().unwrap_or("*server*"),
-            );
-            let msgid = app.current_messages()
-                .iter()
-                .rev()
-                .find(|m| m.msgid.is_some() && !app.is_muted(&target_key, &m.source))
-                .and_then(|m| m.msgid.clone());
-            if let Some(id) = msgid {
-                app.reply_to_msgid = Some(id);
+            // Enter reply-select mode: show numbers 1–9, 0 on last 10 messages; user picks one.
+            let ids = app.replyable_msgids();
+            if ids.is_empty() {
+                app.status_message = "No message with reply support in this buffer.".to_string();
+            } else {
+                app.reply_select_mode = true;
+                app.status_message = "Press 1–9 or 0 to pick message (Esc to cancel).".to_string();
+            }
+        }
+        ReplySelectByNumber(n) => {
+            let ids = app.replyable_msgids();
+            let idx = if n == 10 { 9 } else { (n as usize).saturating_sub(1) };
+            if idx < ids.len() {
+                let msgid = ids[ids.len() - 1 - idx].clone();
+                app.reply_to_msgid = Some(msgid);
+                app.reply_select_mode = false;
                 app.mode = Mode::Insert;
                 app.status_message = "Replying (Esc to cancel).".to_string();
-            } else {
-                app.status_message = "No message with reply support in this buffer.".to_string();
             }
+        }
+        ReplySelectCancel => {
+            app.reply_select_mode = false;
         }
         FocusChannels => {
             if app.channel_panel_visible {
@@ -954,7 +965,23 @@ fn handle_key_action(
                 app.panel_focus = PanelFocus::Friends;
             }
         }
-        UnfocusPanel => app.panel_focus = PanelFocus::Main,
+        UnfocusPanel => {
+            if app.panel_focus == PanelFocus::Users {
+                app.user_list_filter_focused = false;
+            }
+            app.panel_focus = PanelFocus::Main;
+        }
+        FocusInputAndType(c) => {
+            if app.panel_focus == PanelFocus::Users {
+                app.user_list_filter_focused = false;
+            }
+            app.panel_focus = PanelFocus::Main;
+            app.mode = Mode::Insert;
+            if app.input.len() < format::MAX_INPUT_BYTES {
+                app.input.insert(app.input_cursor, c);
+                app.input_cursor += c.len_utf8();
+            }
+        }
         ChannelUp => {
             app.channel_index = app.channel_index.saturating_sub(1);
         }
@@ -980,6 +1007,22 @@ fn handle_key_action(
                 app.mark_target_read(&server, &nick);
                 app.restore_read_marker_for(&server, &nick);
                 app.panel_focus = PanelFocus::Main;
+            }
+        }
+        MessageSelectByNumber(n) => {
+            let list = app.messages_list();
+            let idx = if n == 10 { 9 } else { (n as usize).saturating_sub(1) };
+            let idx = idx.min(list.len().saturating_sub(1));
+            if idx < list.len() {
+                app.messages_index = idx;
+                if let Some((server, nick)) = list.get(idx).cloned() {
+                    app.save_current_read_marker();
+                    app.current_server = Some(server.clone());
+                    app.current_channel = Some(nick.clone());
+                    app.mark_target_read(&server, &nick);
+                    app.restore_read_marker_for(&server, &nick);
+                    app.panel_focus = PanelFocus::Main;
+                }
             }
         }
         FriendUp => {
@@ -1015,6 +1058,7 @@ fn handle_key_action(
                 app.current_channel = Some(target.clone());
                 app.mark_target_read(&server, &target);
                 app.user_list.clear();
+                app.user_list_filter.clear();
                 app.restore_read_marker_for(&server, &target);
                 if target.starts_with('#') || target.starts_with('&') {
                     request_channel_names(clients, app);
@@ -1022,17 +1066,66 @@ fn handle_key_action(
                 app.panel_focus = PanelFocus::Main;
             }
         }
+        ChannelSelectByNumber(n) => {
+            let list = app.channels_list();
+            let idx = if n == 10 { 9 } else { (n as usize).saturating_sub(1) };
+            let idx = idx.min(list.len().saturating_sub(1));
+            if idx < list.len() {
+                app.channel_index = idx;
+                if let Some((server, target)) = list.get(idx).cloned() {
+                    app.save_current_read_marker();
+                    app.current_server = Some(server.clone());
+                    app.current_channel = Some(target.clone());
+                    app.mark_target_read(&server, &target);
+                    app.user_list.clear();
+                    app.user_list_filter.clear();
+                    app.restore_read_marker_for(&server, &target);
+                    if target.starts_with('#') || target.starts_with('&') {
+                        request_channel_names(clients, app);
+                    }
+                    app.panel_focus = PanelFocus::Main;
+                }
+            }
+        }
         UserUp => {
             app.user_index = app.user_index.saturating_sub(1);
         }
         UserDown => {
-            if app.user_index + 1 < app.user_list.len() {
+            let len = app.filtered_user_list().len();
+            if app.user_index + 1 < len {
                 app.user_index += 1;
             }
         }
         UserSelect => {
             app.user_action_menu = true;
             app.user_action_index = 0;
+        }
+        UserSelectByNumber(n) => {
+            let filtered = app.filtered_user_list();
+            let idx = if n == 10 { 9 } else { (n as usize).saturating_sub(1) };
+            let idx = idx.min(filtered.len().saturating_sub(1));
+            if idx < filtered.len() {
+                app.user_index = idx;
+                app.user_action_menu = true;
+                app.user_action_index = 0;
+            }
+        }
+        UserListFilterFocus => {
+            app.user_list_filter_focused = true;
+        }
+        UserListFilterUnfocus => {
+            app.user_list_filter_focused = false;
+        }
+        UserListFilterChar(c) => {
+            if !c.is_control() || c == ' ' {
+                app.user_list_filter.push(c);
+                app.clamp_user_index();
+            }
+        }
+        UserListFilterBackspace => {
+            if app.user_list_filter.pop().is_some() {
+                app.clamp_user_index();
+            }
         }
         UserActionMenuUp => {
             let n = App::user_actions().len();
@@ -1771,9 +1864,7 @@ fn handle_key_action(
                                     app.away_message = None;
                                     app.status_message = "Auto-unaway.".to_string();
                                 }
-                                if !app.acked_caps_per_server.get(&server).map(|s| s.contains("echo-message")).unwrap_or(false) {
-                                    push_self_message(app, &server, &target, formatted, irc_tx, rt);
-                                }
+                                push_self_message(app, &server, &target, formatted, reply_to.clone(), irc_tx, rt);
                             }
                         } else {
                             let mut first = true;
@@ -1798,9 +1889,7 @@ fn handle_key_action(
                                 app.away_message = None;
                                 app.status_message = "Auto-unaway.".to_string();
                             }
-                            if !app.acked_caps_per_server.get(&server).map(|s| s.contains("echo-message")).unwrap_or(false) {
-                                push_self_message(app, &server, &target, formatted, irc_tx, rt);
-                            }
+                            push_self_message(app, &server, &target, formatted, reply_to.clone(), irc_tx, rt);
                         }
                     }
                 } else {
@@ -2434,13 +2523,13 @@ fn run_command(
                             }
                         }
                         if ok {
-                            push_self_message(app, &server, &nick, formatted, irc_tx, rt);
+                            push_self_message(app, &server, &nick, formatted, None, irc_tx, rt);
                         }
                     } else {
                         for chunk in format::split_message_for_irc(&formatted, format::MAX_MESSAGE_BYTES) {
                             c.send_privmsg(&nick, &chunk).map_err(|e| e.to_string())?;
                         }
-                        push_self_message(app, &server, &nick, formatted, irc_tx, rt);
+                        push_self_message(app, &server, &nick, formatted, None, irc_tx, rt);
                     }
                 }
                 let dms = app.dm_targets_per_server.entry(server.clone()).or_default();
@@ -2591,20 +2680,13 @@ fn run_command(
             app.status_message = "Search (type to filter, Enter to browse, Esc to close)".to_string();
         }
         R::Reply => {
-            let target_key = app::msg_key(
-                app.current_server.as_deref().unwrap_or(""),
-                app.current_channel.as_deref().unwrap_or("*server*"),
-            );
-            let msgid = app.current_messages()
-                .iter()
-                .rev()
-                .find(|m| m.msgid.is_some() && !app.is_muted(&target_key, &m.source))
-                .and_then(|m| m.msgid.clone());
-            if let Some(id) = msgid {
-                app.reply_to_msgid = Some(id);
-                app.status_message = "Replying to last message. Press i to type, then Enter to send.".to_string();
-            } else {
+            let ids = app.replyable_msgids();
+            if ids.is_empty() {
                 app.status_message = "No message with reply support in this buffer.".to_string();
+            } else {
+                app.mode = crate::app::Mode::Normal;
+                app.reply_select_mode = true;
+                app.status_message = "Press 1–9 or 0 to pick message (Esc to cancel).".to_string();
             }
         }
         R::Redact { msgid: cmd_msgid, reason } => {
@@ -3180,16 +3262,18 @@ const MAX_GIF_FRAMES: usize = 100;
 
 /// Push a self-sent message to the chat log and spawn image download if the text
 /// contains an image URL. Sender sees their own images inline.
+/// reply_to_msgid: when replying (r + number), the msgid we're replying to (shows ↷).
 fn push_self_message(
     app: &mut App,
     server: &str,
     target: &str,
     text: String,
+    reply_to_msgid: Option<String>,
     irc_tx: &IrcMessageTx,
     rt: &tokio::runtime::Runtime,
 ) {
     let nick = app.current_nickname.clone().unwrap_or_else(|| "?".to_string());
-    let mut line = MessageLine { source: nick, text, kind: MessageKind::Privmsg, image_id: None, timestamp: None, account: None, msgid: None, reply_to_msgid: None, is_bot_sender: false };
+    let mut line = MessageLine { source: nick, text, kind: MessageKind::Privmsg, image_id: None, timestamp: None, account: None, msgid: None, reply_to_msgid, is_bot_sender: false };
     if app.render_images {
         if let Some(url) = extract_image_url(&line.text) {
             line.image_id = Some(app.next_image_id);

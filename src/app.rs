@@ -118,6 +118,10 @@ pub struct App {
     pub friends_panel_visible: bool,
     pub user_list: Vec<String>,
     pub user_index: usize,
+    /// Users pane: filter text (active when focused); f to focus, type to filter, Esc to unfocus.
+    pub user_list_filter: String,
+    /// When true, key events add to user_list_filter instead of navigating.
+    pub user_list_filter_focused: bool,
     pub user_action_menu: bool,
     pub user_action_index: usize,
     /// Friends list (MONITOR targets). Persisted per server.
@@ -186,6 +190,8 @@ pub struct App {
     pub message_scroll_offset: usize,
     /// When set, next sent PRIVMSG will include +reply tag with this msgid (IRCv3 reply).
     pub reply_to_msgid: Option<String>,
+    /// Reply-select mode: r pressed, waiting for 1-9 or 0 to pick which message to reply to.
+    pub reply_select_mode: bool,
     /// (server, target) for which we've sent CHATHISTORY BEFORE and are waiting for batch.
     pub chathistory_before_pending: Option<(String, String)>,
 
@@ -371,6 +377,8 @@ impl App {
             friends_panel_visible: true,
             user_list: Vec::new(),
             user_index: 0,
+            user_list_filter: String::new(),
+            user_list_filter_focused: false,
             user_action_menu: false,
             user_action_index: 0,
             friends_list: Vec::new(),
@@ -409,6 +417,7 @@ impl App {
             license_popup_scroll_offset: 0,
             message_scroll_offset: 0,
             reply_to_msgid: None,
+            reply_select_mode: false,
             chathistory_before_pending: None,
             acked_caps_per_server: HashMap::new(),
             requested_caps_per_server: HashMap::new(),
@@ -648,6 +657,32 @@ impl App {
             .unwrap_or(&[])
     }
 
+    /// Replyable messages (with msgid, unmuted) in chronological order.
+    /// Used for reply-select: 1 = last, 2 = second-to-last, etc.
+    pub fn replyable_msgids(&self) -> Vec<String> {
+        let target_key = msg_key(
+            self.current_server.as_deref().unwrap_or(""),
+            self.current_channel.as_deref().unwrap_or("*server*"),
+        );
+        self.current_messages()
+            .iter()
+            .filter(|m| m.msgid.is_some() && !self.is_muted(&target_key, &m.source))
+            .filter_map(|m| m.msgid.clone())
+            .collect()
+    }
+
+    /// msgid -> display number (1–9, 10 for "0") for reply-select mode. Only last 10 get numbers.
+    pub fn reply_select_numbers(&self) -> std::collections::HashMap<String, u8> {
+        let ids = self.replyable_msgids();
+        let len = ids.len();
+        let mut map = std::collections::HashMap::new();
+        for (i, msgid) in ids.iter().enumerate().rev().take(10) {
+            let num = (len - i) as u8;
+            map.insert(msgid.clone(), if num == 10 { 10 } else { num });
+        }
+        map
+    }
+
     /// Update search_results from current_messages filtered by search_filter (case-insensitive).
     pub fn update_search_results(&mut self) {
         let server = self.current_server.as_deref().unwrap_or("");
@@ -838,7 +873,7 @@ impl App {
 
     /// Nick without channel prefix (for commands: /msg, whois, etc.).
     pub fn selected_user(&self) -> Option<String> {
-        self.user_list
+        self.filtered_user_list()
             .get(self.user_index)
             .map(|s| Self::strip_user_prefix(s).to_string())
     }
@@ -909,6 +944,32 @@ impl App {
             self.messages_index = 0;
         } else {
             self.messages_index = self.messages_index.min(len - 1);
+        }
+    }
+
+    /// Users pane: filter by nick (case-insensitive substring). Strips role prefixes for matching.
+    pub fn filtered_user_list(&self) -> Vec<String> {
+        let q = self.user_list_filter.to_lowercase();
+        if q.is_empty() {
+            return self.user_list.clone();
+        }
+        self.user_list
+            .iter()
+            .filter(|u| {
+                let nick = u.trim_start_matches(|c: char| matches!(c, '~' | '&' | '@' | '%' | '+' | '!' | '.'));
+                nick.to_lowercase().contains(&q)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Clamp user_index to filtered user list length.
+    pub fn clamp_user_index(&mut self) {
+        let len = self.filtered_user_list().len();
+        if len == 0 {
+            self.user_index = 0;
+        } else {
+            self.user_index = self.user_index.min(len - 1);
         }
     }
 

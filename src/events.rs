@@ -7,6 +7,7 @@ pub fn handle_key(
     event: Event,
     mode: Mode,
     panel_focus: PanelFocus,
+    reply_select_mode: bool,
     channel_panel_visible: bool,
     messages_panel_visible: bool,
     user_panel_visible: bool,
@@ -25,6 +26,7 @@ pub fn handle_key(
     secure_accept_popup_visible: bool,
     highlight_popup_visible: bool,
     away_popup_visible: bool,
+    user_list_filter_focused: bool,
 ) -> Option<KeyAction> {
     if let Event::Paste(s) = event {
         return Some(KeyAction::Paste(s));
@@ -34,6 +36,9 @@ pub fn handle_key(
         _ => return None,
     };
 
+    if reply_select_mode {
+        return Some(handle_reply_select(key));
+    }
     if away_popup_visible {
         return Some(KeyAction::DismissAwayPopup);
     }
@@ -77,7 +82,7 @@ pub fn handle_key(
         return Some(handle_messages_pane(key));
     }
     if mode == Mode::Normal && panel_focus == PanelFocus::Users && user_panel_visible {
-        return Some(handle_users_pane(key));
+        return Some(handle_users_pane(key, user_list_filter_focused));
     }
     if mode == Mode::Normal && panel_focus == PanelFocus::Friends && friends_panel_visible {
         return Some(handle_friends_pane(key));
@@ -103,15 +108,22 @@ pub enum KeyAction {
     ChannelUp,
     ChannelDown,
     ChannelSelect,
+    ChannelSelectByNumber(u8),  // 1–9 or 10 (for key 0)
     MessageUp,
     MessageDown,
     MessageSelect,
+    MessageSelectByNumber(u8),
     FriendUp,
     FriendDown,
     FriendSelect,
     UserUp,
     UserDown,
     UserSelect,
+    UserSelectByNumber(u8),
+    UserListFilterFocus,
+    UserListFilterUnfocus,
+    UserListFilterChar(char),
+    UserListFilterBackspace,
     UserActionMenuUp,
     UserActionMenuDown,
     UserActionConfirm,
@@ -147,6 +159,8 @@ pub enum KeyAction {
     MessageScrollDown,
     MessageScrollPageUp,
     MessageScrollPageDown,
+    /// Unfocus side pane (if needed) and start typing: switch to Insert and insert this char into input bar.
+    FocusInputAndType(char),
     Char(char),
     Backspace,
     Enter,
@@ -185,6 +199,27 @@ pub enum KeyAction {
     Paste(String),
     /// Reply to last message with msgid; set reply_to_msgid and switch to Insert.
     Reply,
+    /// Reply-select mode: pick message by number (1=latest, 0=10th).
+    ReplySelectByNumber(u8),
+    /// Reply-select mode: cancel without replying.
+    ReplySelectCancel,
+}
+
+fn handle_reply_select(key: KeyEvent) -> KeyAction {
+    match key.code {
+        KeyCode::Esc => KeyAction::ReplySelectCancel,
+        KeyCode::Char('1') => KeyAction::ReplySelectByNumber(1),
+        KeyCode::Char('2') => KeyAction::ReplySelectByNumber(2),
+        KeyCode::Char('3') => KeyAction::ReplySelectByNumber(3),
+        KeyCode::Char('4') => KeyAction::ReplySelectByNumber(4),
+        KeyCode::Char('5') => KeyAction::ReplySelectByNumber(5),
+        KeyCode::Char('6') => KeyAction::ReplySelectByNumber(6),
+        KeyCode::Char('7') => KeyAction::ReplySelectByNumber(7),
+        KeyCode::Char('8') => KeyAction::ReplySelectByNumber(8),
+        KeyCode::Char('9') => KeyAction::ReplySelectByNumber(9),
+        KeyCode::Char('0') => KeyAction::ReplySelectByNumber(10),
+        _ => KeyAction::NoOp,
+    }
 }
 
 fn handle_normal(key: KeyEvent, panel_focus: PanelFocus) -> Option<KeyAction> {
@@ -207,6 +242,9 @@ fn handle_normal(key: KeyEvent, panel_focus: PanelFocus) -> Option<KeyAction> {
         (KeyCode::Char('u'), KeyModifiers::NONE) => Some(KeyAction::FocusUsers),
         (KeyCode::Char('f'), KeyModifiers::NONE) => Some(KeyAction::FocusFriends),
         (KeyCode::Esc, _) if panel_focus != PanelFocus::Main => Some(KeyAction::UnfocusPanel),
+        (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT)
+            if !c.is_control() || c == ' ' || c == '\t' =>
+            Some(KeyAction::FocusInputAndType(c)),
         _ => None,
     }
 }
@@ -263,6 +301,17 @@ fn handle_channels_pane(key: KeyEvent) -> KeyAction {
         KeyCode::Up | KeyCode::Char('k') => KeyAction::ChannelUp,
         KeyCode::Down | KeyCode::Char('j') => KeyAction::ChannelDown,
         KeyCode::Enter => KeyAction::ChannelSelect,
+        KeyCode::Char('1') => KeyAction::ChannelSelectByNumber(1),
+        KeyCode::Char('2') => KeyAction::ChannelSelectByNumber(2),
+        KeyCode::Char('3') => KeyAction::ChannelSelectByNumber(3),
+        KeyCode::Char('4') => KeyAction::ChannelSelectByNumber(4),
+        KeyCode::Char('5') => KeyAction::ChannelSelectByNumber(5),
+        KeyCode::Char('6') => KeyAction::ChannelSelectByNumber(6),
+        KeyCode::Char('7') => KeyAction::ChannelSelectByNumber(7),
+        KeyCode::Char('8') => KeyAction::ChannelSelectByNumber(8),
+        KeyCode::Char('9') => KeyAction::ChannelSelectByNumber(9),
+        KeyCode::Char('0') => KeyAction::ChannelSelectByNumber(10),
+        KeyCode::Char(c) if !c.is_control() || c == ' ' || c == '\t' => KeyAction::FocusInputAndType(c),
         _ => KeyAction::NoOp,
     }
 }
@@ -273,17 +322,49 @@ fn handle_messages_pane(key: KeyEvent) -> KeyAction {
         KeyCode::Up | KeyCode::Char('k') => KeyAction::MessageUp,
         KeyCode::Down | KeyCode::Char('j') => KeyAction::MessageDown,
         KeyCode::Enter => KeyAction::MessageSelect,
+        KeyCode::Char('1') => KeyAction::MessageSelectByNumber(1),
+        KeyCode::Char('2') => KeyAction::MessageSelectByNumber(2),
+        KeyCode::Char('3') => KeyAction::MessageSelectByNumber(3),
+        KeyCode::Char('4') => KeyAction::MessageSelectByNumber(4),
+        KeyCode::Char('5') => KeyAction::MessageSelectByNumber(5),
+        KeyCode::Char('6') => KeyAction::MessageSelectByNumber(6),
+        KeyCode::Char('7') => KeyAction::MessageSelectByNumber(7),
+        KeyCode::Char('8') => KeyAction::MessageSelectByNumber(8),
+        KeyCode::Char('9') => KeyAction::MessageSelectByNumber(9),
+        KeyCode::Char('0') => KeyAction::MessageSelectByNumber(10),
         _ => KeyAction::NoOp,
     }
 }
 
-fn handle_users_pane(key: KeyEvent) -> KeyAction {
-    match key.code {
-        KeyCode::Char('u') | KeyCode::Esc => KeyAction::UnfocusPanel,
-        KeyCode::Up | KeyCode::Char('k') => KeyAction::UserUp,
-        KeyCode::Down | KeyCode::Char('j') => KeyAction::UserDown,
-        KeyCode::Enter => KeyAction::UserSelect,
-        _ => KeyAction::NoOp,
+fn handle_users_pane(key: KeyEvent, filter_focused: bool) -> KeyAction {
+    use crossterm::event::KeyModifiers;
+    if filter_focused {
+        match (key.code, key.modifiers) {
+            (KeyCode::Esc, _) => KeyAction::UserListFilterUnfocus,
+            (KeyCode::Backspace, _) => KeyAction::UserListFilterBackspace,
+            (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => KeyAction::UserListFilterChar(c),
+            _ => KeyAction::NoOp,
+        }
+    } else {
+        match key.code {
+            KeyCode::Char('u') | KeyCode::Esc => KeyAction::UnfocusPanel,
+            KeyCode::Char('f') => KeyAction::UserListFilterFocus,
+            KeyCode::Up | KeyCode::Char('k') => KeyAction::UserUp,
+            KeyCode::Down | KeyCode::Char('j') => KeyAction::UserDown,
+            KeyCode::Enter => KeyAction::UserSelect,
+            KeyCode::Char('1') => KeyAction::UserSelectByNumber(1),
+            KeyCode::Char('2') => KeyAction::UserSelectByNumber(2),
+            KeyCode::Char('3') => KeyAction::UserSelectByNumber(3),
+            KeyCode::Char('4') => KeyAction::UserSelectByNumber(4),
+            KeyCode::Char('5') => KeyAction::UserSelectByNumber(5),
+            KeyCode::Char('6') => KeyAction::UserSelectByNumber(6),
+            KeyCode::Char('7') => KeyAction::UserSelectByNumber(7),
+            KeyCode::Char('8') => KeyAction::UserSelectByNumber(8),
+            KeyCode::Char('9') => KeyAction::UserSelectByNumber(9),
+            KeyCode::Char('0') => KeyAction::UserSelectByNumber(10),
+            KeyCode::Char(c) if !c.is_control() || c == ' ' || c == '\t' => KeyAction::FocusInputAndType(c),
+            _ => KeyAction::NoOp,
+        }
     }
 }
 
@@ -293,6 +374,7 @@ fn handle_friends_pane(key: KeyEvent) -> KeyAction {
         KeyCode::Up | KeyCode::Char('k') => KeyAction::FriendUp,
         KeyCode::Down | KeyCode::Char('j') => KeyAction::FriendDown,
         KeyCode::Enter => KeyAction::FriendSelect,
+        KeyCode::Char(c) if !c.is_control() || c == ' ' || c == '\t' => KeyAction::FocusInputAndType(c),
         _ => KeyAction::NoOp,
     }
 }

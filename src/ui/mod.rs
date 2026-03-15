@@ -366,16 +366,22 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
     let mut cur_y = content_y + top_pad;
     let max_y = content_y + content_height as u16;
     let nick = app.current_nickname.as_deref().map(|s| s.to_string());
+    let reply_numbers = if app.reply_select_mode {
+        app.reply_select_numbers()
+    } else {
+        std::collections::HashMap::new()
+    };
 
     for i in visible_start..visible_end {
         if cur_y >= max_y {
             break;
         }
         let m = &messages[i];
+        let reply_num = m.msgid.as_ref().and_then(|id| reply_numbers.get(id).copied());
         let elapsed_ms = std::time::Instant::now().duration_since(app.created_at).as_millis() as u64;
         let text_h = message_wrapped_height(m, nick.as_deref(), inner.width, &app.reactions);
         let avail_text_h = text_h.min(max_y.saturating_sub(cur_y));
-        let content = format_message_line_wrapped(m, nick.as_deref(), &app.highlight_words, &app.reactions, inner.width, elapsed_ms);
+        let content = format_message_line_wrapped(m, nick.as_deref(), &app.highlight_words, &app.reactions, inner.width, elapsed_ms, reply_num);
         let text_rect = Rect { x: inner.x, y: cur_y, width: inner.width, height: avail_text_h };
         f.render_widget(
             Paragraph::new(content).wrap(Wrap { trim: true }),
@@ -424,6 +430,7 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
 /// Format a message line: header "nick | HH:mm" then message on following lines.
 /// Nick gets a deterministic color. Parses IRC formatting (bold, italic, etc.) for the message.
 /// Appends draft/react reactions if present.
+/// reply_num: when in reply-select mode, 1-9 or 10 (displays as "0") to show which key selects this message.
 fn format_message_line_wrapped(
     m: &MessageLine,
     current_nick: Option<&str>,
@@ -431,7 +438,24 @@ fn format_message_line_wrapped(
     reactions: &std::collections::HashMap<String, Vec<(String, String)>>,
     width: u16,
     elapsed_ms: u64,
+    reply_num: Option<u8>,
 ) -> Text<'static> {
+    let num_prefix = reply_num.map(|n| {
+        let s = match n {
+            1 => " 1",
+            2 => " 2",
+            3 => " 3",
+            4 => " 4",
+            5 => " 5",
+            6 => " 6",
+            7 => " 7",
+            8 => " 8",
+            9 => " 9",
+            10 => " 0",
+            _ => "  ",
+        };
+        Span::styled(s, Style::default().fg(Color::Cyan))
+    }).unwrap_or_else(|| Span::raw(""));
     let time_str = m
         .timestamp
         .as_ref()
@@ -444,7 +468,11 @@ fn format_message_line_wrapped(
     let account_prefix = m.account.as_ref().map(|a| format!("[{}] ", a)).unwrap_or_default();
     let bot_prefix = if m.is_bot_sender { "[bot] " } else { "" };
     let reply_indicator = m.reply_to_msgid.as_ref().map(|_| " ↷").unwrap_or_default();
-    let header_line = Line::from(vec![
+    let mut header_spans = vec![num_prefix];
+    if reply_num.is_some() {
+        header_spans.push(Span::raw(" "));
+    }
+    header_spans.extend(vec![
         Span::styled(account_prefix, Style::default().add_modifier(Modifier::DIM)),
         Span::styled(bot_prefix, Style::default().fg(Color::Cyan)),
         Span::styled(m.source.clone(), header_style),
@@ -452,6 +480,7 @@ fn format_message_line_wrapped(
         Span::styled(time_str, Style::default().add_modifier(Modifier::DIM)),
         Span::styled(reply_indicator, Style::default().add_modifier(Modifier::DIM)),
     ]);
+    let header_line = Line::from(header_spans);
     // Message body: IRC formatting, highlights, rainbow, etc.
     let mut msg_spans = crate::format::parse_message_with_rainbow(&m.text, elapsed_ms);
     let mut highlight_words = highlight_words.to_vec();
@@ -591,16 +620,28 @@ fn draw_channels_pane(f: &mut Frame, area: Rect, app: &App) {
             let label = target_display_label_for_entry(s, t);
             let key = msg_key(s, t);
             let secure = app.secure_sessions.contains_key(&key);
+            let num = if show_selector {
+                let n = i + 1;
+                if n <= 9 { format!("{}", n) } else if n == 10 { "0".to_string() } else { String::new() }
+            } else {
+                String::new()
+            };
             let prefix = if show_selector && i == app.channel_index {
                 if t == "*server*" {
-                    "> "
+                    format!(">{} ", num)
                 } else {
-                    ">   "  // same width as "    " so channel name doesn't shift
+                    format!(">{}  ", num)
+                }
+            } else if show_selector && !num.is_empty() {
+                if t == "*server*" {
+                    format!(" {} ", num)
+                } else {
+                    format!(" {}  ", num)
                 }
             } else if t == "*server*" {
-                "  "
+                "  ".to_string()
             } else {
-                "    "
+                "    ".to_string()
             };
             let style = if app.unread_mentions.contains(&key) {
                 Style::default().fg(Color::Red)
@@ -609,11 +650,10 @@ fn draw_channels_pane(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 Style::default()
             };
-            let prefix_style = Style::default();  // selector stays white
             if secure {
                 let verified = app.known_keys.is_verified(t, s);
                 let mut spans = vec![
-                    Span::styled(prefix, prefix_style),
+                    Span::raw(prefix),
                     Span::styled("\u{1F512}", Style::default().fg(Color::Green)),
                 ];
                 if verified {
@@ -623,7 +663,7 @@ fn draw_channels_pane(f: &mut Frame, area: Rect, app: &App) {
                 ListItem::new(Line::from(spans))
             } else {
                 let line = Line::from(vec![
-                    Span::styled(prefix, prefix_style),
+                    Span::raw(prefix),
                     Span::styled(format!("{}  ", label), style),
                 ]);
                 ListItem::new(line)
@@ -646,10 +686,18 @@ fn draw_messages_pane(f: &mut Frame, area: Rect, app: &App) {
         .map(|(i, (s, nick))| {
             let key = msg_key(s, nick);
             let secure = app.secure_sessions.contains_key(&key);
-            let prefix = if show_selector && i == app.messages_index {
-                "> "
+            let num = if show_selector {
+                let n = i + 1;
+                if n <= 9 { format!("{}", n) } else if n == 10 { "0".to_string() } else { String::new() }
             } else {
-                "  "
+                String::new()
+            };
+            let prefix = if show_selector && i == app.messages_index {
+                format!(">{} ", num)
+            } else if show_selector && !num.is_empty() {
+                format!(" {} ", num)
+            } else {
+                "  ".to_string()
             };
             let style = if app.unread_mentions.contains(&key) {
                 Style::default().fg(Color::Red)
@@ -658,11 +706,10 @@ fn draw_messages_pane(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 Style::default()
             };
-            let prefix_style = Style::default();  // selector stays white
             if secure {
                 let verified = app.known_keys.is_verified(nick, s);
                 let mut spans = vec![
-                    Span::styled(prefix, prefix_style),
+                    Span::raw(prefix),
                     Span::styled("\u{1F512}", Style::default().fg(Color::Green)),
                 ];
                 if verified {
@@ -672,7 +719,7 @@ fn draw_messages_pane(f: &mut Frame, area: Rect, app: &App) {
                 ListItem::new(Line::from(spans))
             } else {
                 let line = Line::from(vec![
-                    Span::styled(prefix, prefix_style),
+                    Span::raw(prefix),
                     Span::styled(format!("{}  ", nick), style),
                 ]);
                 ListItem::new(line)
@@ -708,12 +755,16 @@ fn user_list_nick(entry: &str) -> &str {
 fn draw_users_pane(f: &mut Frame, area: Rect, app: &App) {
     let show_selector = app.panel_focus == PanelFocus::Users;
     let server = app.current_server.as_deref().unwrap_or("");
-    let items: Vec<ListItem> = app
-        .user_list
+    let filtered = app.filtered_user_list();
+    let items: Vec<ListItem> = filtered
         .iter()
         .enumerate()
         .map(|(i, u)| {
-            let prefix = if show_selector && i == app.user_index { "> " } else { "  " };
+            let prefix = if show_selector && i == app.user_index {
+                "> "
+            } else {
+                "  "
+            };
             let role_style = user_prefix_style(u);
             let nick = user_list_nick(u);
             let account_suffix = app
@@ -743,14 +794,20 @@ fn draw_users_pane(f: &mut Frame, area: Rect, app: &App) {
             ListItem::new(line)
         })
         .collect();
+    let title = if app.user_list_filter.is_empty() {
+        " Users ".to_string()
+    } else {
+        format!(" Users [f filter: {}] ", app.user_list_filter)
+    };
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" Users "))
+        .block(Block::default().borders(Borders::ALL).title(title))
         .style(Style::default());
     let visible = area.height.saturating_sub(2) as usize;
-    let offset = if app.user_list.len() <= visible {
+    let filtered_len = filtered.len();
+    let offset = if filtered_len <= visible || visible == 0 {
         0
     } else {
-        (app.user_index + 1).saturating_sub(visible).min(app.user_list.len() - visible).max(0)
+        (app.user_index + 1).saturating_sub(visible).min(filtered_len.saturating_sub(visible)).max(0)
     };
     let mut state = ListState::default().with_selected(Some(app.user_index)).with_offset(offset);
     f.render_stateful_widget(list, area, &mut state);

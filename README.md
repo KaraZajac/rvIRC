@@ -33,7 +33,7 @@
 | **IRC: draft/chathistory** | Chat history on channel join |
 | **IRC: draft/pre-away** | Sends AWAY before registration on reconnect if you were away |
 | **IRC: standard-replies** | FAIL/WARN/NOTE from server shown as structured messages (red/yellow/dim) |
-| **IRC: reply** | `r` or `:reply` to reply to last message; sends with +reply tag (IRCv3 reply) |
+| **IRC: reply** | `r` or `:reply` — numbers 1–9, 0 appear on last 10 messages (1 = latest); press a number to pick, type, Enter to send with +reply tag |
 | **IRC: chathistory scroll-back** | Page Up at top or `:more` fetches older messages (CHATHISTORY BEFORE) |
 | **IRC: STS** | Persists STS policies from secure connections; forces TLS on future connects |
 | **IRC: echo-message** | When server acks: server echoes our messages; else rvIRC local-echoes |
@@ -104,6 +104,7 @@ Type `:` to enter COMMAND mode, then run any of these (case-insensitive):
 |-----|--------|
 | `i` | Enter INSERT mode (type messages) |
 | `:` | Enter COMMAND mode (run commands) |
+| `r` | Reply to message — numbers appear on last 10 messages; press 1–9 or 0 to pick, then type and Enter |
 | `c` | Focus channels pane |
 | `m` | Focus messages pane |
 | `u` | Focus users pane |
