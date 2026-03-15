@@ -557,9 +557,13 @@ fn apply_irc_message(
                 if let Some(evt) = parse_rvirc_protocol(&line.source, &line.text) {
                     app.protocol_events.push(evt);
                 }
-                let dms = app.dm_targets_per_server.entry(server.to_string()).or_default();
-                if !dms.contains(&line.source) {
-                    dms.push(line.source.clone());
+                // Don't add our own nick to dm_targets (e.g. echo of our SECURE:ACK creates a self-DM)
+                let is_self = app.current_nickname.as_ref().map_or(false, |n| n.eq_ignore_ascii_case(&line.source));
+                if !is_self {
+                    let dms = app.dm_targets_per_server.entry(server.to_string()).or_default();
+                    if !dms.contains(&line.source) {
+                        dms.push(line.source.clone());
+                    }
                 }
                 return;
             }
