@@ -276,6 +276,21 @@ fn main() -> Result<(), String> {
                         if line.is_bot_sender && !line.source.is_empty() {
                             app.bot_per_nick.insert((server.clone(), line.source.to_lowercase()));
                         }
+                        // Process rvIRC protocol lines (wormhole offers, secure init, etc.) instead of showing raw
+                        if line.text.starts_with("[:rvIRC:") {
+                            let is_self = app.current_nickname.as_ref().map_or(false, |n| n.eq_ignore_ascii_case(&line.source));
+                            if !is_self {
+                                if let Some(evt) = parse_rvirc_protocol(&line.source, &line.text) {
+                                    app.protocol_events.push(evt);
+                                }
+                                let dms = app.dm_targets_per_server.entry(server.clone()).or_default();
+                                if !dms.contains(&line.source) {
+                                    dms.push(line.source.clone());
+                                }
+                            }
+                            // Don't insert raw protocol string - handler will push_chat_log
+                            continue;
+                        }
                         buf.insert(0, line.clone());
                     }
                 }
@@ -2553,10 +2568,11 @@ fn run_command(
                 app.status_message = "Not connected.".to_string();
             }
         }
-        R::Quit(_) => {
+        R::Quit(msg) => {
             app.clear_reconnect();
+            let quit_msg = msg.as_deref().unwrap_or("Leaving");
             for (_, (c, h)) in std::mem::take(clients) {
-                let _ = c.send_quit("Leaving");
+                let _ = c.send_quit(quit_msg);
                 h.abort();
             }
             std::thread::sleep(std::time::Duration::from_millis(250));

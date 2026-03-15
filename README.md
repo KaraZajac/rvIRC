@@ -83,7 +83,7 @@ Type `:` to enter COMMAND mode, or `/` in the input bar (e.g. `/pass xyz`), then
 | `search` | Search in current buffer (popup) |
 | `clear` | Clear current channel/DM messages |
 | `channel #chan` / `chan` / `c #chan` | Switch to channel/DM by name |
-| `quit` / `exit` / `q` | Disconnect and quit |
+| `quit` / `exit` / `q` [message] | Disconnect and quit (optional message for other users, e.g. `:quit Goodbye`) |
 | `channel-panel show` / `hide` | Show or hide the channels pane (top left) |
 | `messages-panel show` / `hide` | Show or hide the messages pane (bottom left) |
 | `user-panel show` / `hide` | Show or hide the users pane (top right) |

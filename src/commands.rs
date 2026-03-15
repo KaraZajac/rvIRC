@@ -14,7 +14,7 @@ pub enum CommandResult {
     Connect(String),
     Reconnect,
     Disconnect(Option<String>),
-    Quit(()),
+    Quit(Option<String>),  // Some(msg) = custom quit message, None = default "Leaving"
     Msg { nick: String, text: String },
     Me(String), // ACTION to current target
     Nick(String),
@@ -128,8 +128,14 @@ pub fn parse(line: &str) -> CommandResult {
             let server = if rest.is_empty() { None } else { Some(rest.to_string()) };
             CommandResult::Disconnect(server)
         }
-        "quit" | "exit" => CommandResult::Quit(()),
-        "q" if rest.trim().is_empty() => CommandResult::Quit(()),
+        "quit" | "exit" => {
+            let msg = rest.trim();
+            CommandResult::Quit(if msg.is_empty() { None } else { Some(msg.to_string()) })
+        }
+        "q" => {
+            let msg = rest.trim();
+            CommandResult::Quit(if msg.is_empty() { None } else { Some(msg.to_string()) })
+        }
         "me" => {
             if rest.is_empty() {
                 CommandResult::StatusMessage("Usage: :me <action text>".to_string())
