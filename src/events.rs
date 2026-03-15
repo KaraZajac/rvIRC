@@ -24,6 +24,7 @@ pub fn handle_key(
     file_browser_visible: bool,
     secure_accept_popup_visible: bool,
     highlight_popup_visible: bool,
+    away_popup_visible: bool,
 ) -> Option<KeyAction> {
     if let Event::Paste(s) = event {
         return Some(KeyAction::Paste(s));
@@ -33,6 +34,9 @@ pub fn handle_key(
         _ => return None,
     };
 
+    if away_popup_visible {
+        return Some(KeyAction::DismissAwayPopup);
+    }
     if file_browser_visible {
         return Some(handle_file_browser(key));
     }
@@ -176,8 +180,11 @@ pub enum KeyAction {
     HighlightPopupClose,
     HighlightPopupInputChar(char),
     HighlightPopupBackspace,
+    DismissAwayPopup,
     /// Bracketed paste: insert string at cursor in one go (avoids O(n²) char-by-char).
     Paste(String),
+    /// Reply to last message with msgid; set reply_to_msgid and switch to Insert.
+    Reply,
 }
 
 fn handle_normal(key: KeyEvent, panel_focus: PanelFocus) -> Option<KeyAction> {
@@ -193,6 +200,7 @@ fn handle_normal(key: KeyEvent, panel_focus: PanelFocus) -> Option<KeyAction> {
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(KeyAction::QuitApp),
         (KeyCode::Char('i'), KeyModifiers::NONE) => Some(KeyAction::SwitchMode(Mode::Insert)),
+        (KeyCode::Char('r'), KeyModifiers::NONE) => Some(KeyAction::Reply),
         (KeyCode::Char(':'), KeyModifiers::NONE) => Some(KeyAction::SwitchMode(Mode::Command)),
         (KeyCode::Char('c'), KeyModifiers::NONE) => Some(KeyAction::FocusChannels),
         (KeyCode::Char('m'), KeyModifiers::NONE) => Some(KeyAction::FocusMessages),

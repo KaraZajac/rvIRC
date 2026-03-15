@@ -26,7 +26,7 @@ pub enum IrcMessage {
     Line { server: String, target: String, line: MessageLine },
     JoinedChannel { server: String, channel: String },
     PartedChannel { server: String, channel: String },
-    UserList { server: String, channel: String, users: Vec<String> },
+    UserList { server: String, channel: String, users: Vec<String>, userhosts: Vec<(String, String)> },
     /// (channel name, optional user count from LIST)
     ChannelList { server: String, list: Vec<(String, Option<u32>)> },
     Connected { server: String },
@@ -36,8 +36,8 @@ pub enum IrcMessage {
     Topic { server: String, channel: String, topic: Option<String> },
     /// Channel modes (324): +modes mode_params
     ChannelModes { server: String, channel: String, modes: String },
-    /// INVITE nick channel
-    Invite { server: String, nick: String, channel: String },
+    /// INVITE inviter target channel (target may be us or another user with invite-notify)
+    Invite { server: String, inviter: String, target: String, channel: String },
     /// 433: nickname in use, try alt
     NickInUse { server: String },
     /// Incoming CTCP request (VERSION, PING, TIME) - main loop sends reply.
@@ -75,25 +75,71 @@ pub enum IrcMessage {
     MonOffline { server: String, nicks: Vec<String> },
     /// away-notify: nick set or cleared away status. away=true if away, false if back.
     FriendAway { server: String, nick: String, away: bool },
+    /// account-notify: nick logged in (Some) or out (None).
+    AccountUpdate { server: String, nick: String, account: Option<String> },
     /// IRCv3 typing indicator: nick typing in target with status (active|paused|done).
     Typing { server: String, nick: String, target: String, status: String },
     /// Request chat history for target (channel or DM). Emitted when we join a channel.
     RequestChathistory { server: String, target: String },
+    /// CHATHISTORY BEFORE for scroll-back. reference is "msgid=xxx" or "timestamp=YYYY-MM-DDThh:mm:ss.sssZ"
+    RequestChathistoryBefore { server: String, target: String, reference: String },
+    /// cap-notify: server sent CAP NEW/DEL; caps added or removed.
+    CapsChanged { server: String, added: Vec<String>, removed: Vec<String> },
+    /// chghost: nick changed username/host (no QUIT+JOIN).
+    ChgHost { server: String, nick: String, new_user: String, new_host: String },
+    /// setname: nick changed realname.
+    Setname { server: String, nick: String, realname: String },
     /// Chat history batch from server (draft/chathistory). Prepend to target buffer.
     ChathistoryBatch { server: String, target: String, lines: Vec<MessageLine> },
+    /// STS policy received on secure connection (duration=). Main loop persists to file.
+    StsPolicyReceived { host: String, port: u16, duration_secs: u64 },
+    /// STS upgrade required: connected over plain, server sent sts=port=. Reconnect with TLS.
+    StsUpgradeRequired { server: String, host: String, port: u16 },
+    /// Standard-replies: FAIL/WARN/NOTE from server (structured errors, warnings, notes).
+    StandardReply {
+        server: String,
+        kind: StandardReplyKind,
+        command: String,
+        code: String,
+        description: String,
+    },
+    /// REDACT: message was redacted, remove or replace in buffer.
+    MessageRedacted { server: String, target: String, msgid: String },
+    /// draft/react: nick reacted to msgid with emoji (or unreacted).
+    Reaction {
+        server: String,
+        target: String,
+        msgid: String,
+        nick: String,
+        emoji: String,
+        unreact: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StandardReplyKind {
+    Fail,
+    Warn,
+    Note,
 }
 
 fn cap_to_name(c: &Capability) -> String {
     c.as_ref().to_lowercase()
 }
 
-fn server_entry_to_irc_config(entry: &ServerEntry, rv: &RvConfig) -> IrcConfig {
+fn server_entry_to_irc_config(entry: &ServerEntry, rv: &RvConfig, sts_policies: &crate::sts::StsPolicies) -> IrcConfig {
     use irc::client::data::ProxyType;
+
+    let (port, use_tls) = if let Some((policy_port, _)) = sts_policies.get_valid(&entry.host) {
+        (policy_port, true)
+    } else {
+        (entry.port, entry.tls)
+    };
 
     let mut cfg = IrcConfig::default();
     cfg.server = Some(entry.host.clone());
-    cfg.port = Some(entry.port);
-    cfg.use_tls = Some(entry.tls);
+    cfg.port = Some(port);
+    cfg.use_tls = Some(use_tls);
     cfg.nickname = rv.nickname.clone().or_else(|| Some("rvirc".to_string()));
     cfg.username = rv.username.clone().or_else(|| cfg.nickname.clone());
     cfg.realname = rv.real_name.clone().or_else(|| cfg.nickname.clone());
@@ -129,10 +175,12 @@ pub fn connect(
     rv_config: &RvConfig,
     tx: IrcMessageTx,
     rt: &tokio::runtime::Runtime,
+    initial_away: Option<String>,
+    sts_policies: &crate::sts::StsPolicies,
 ) -> Result<(Client, ClientStream), String> {
     use futures_util::StreamExt;
 
-    let irc_config = server_entry_to_irc_config(server_entry, rv_config);
+    let irc_config = server_entry_to_irc_config(server_entry, rv_config, sts_policies);
     let sasl_mechanism = server_entry
         .sasl_mechanism
         .as_deref()
@@ -147,11 +195,25 @@ pub fn connect(
 
         // Request caps one at a time; some servers (e.g. Libera) NAK batches but ACK individual caps.
         let mut caps: Vec<Capability> = vec![
+            Capability::MultiPrefix,
+            Capability::AccountNotify,
+            Capability::AccountTag,
+            Capability::ExtendedJoin,
+            Capability::InviteNotify,
+            Capability::CapNotify,
+            Capability::ChgHost,
             Capability::AwayNotify,
             Capability::Custom("message-tags"),
+            Capability::EchoMessage,
             Capability::ServerTime,
+            Capability::UserhostInNames,
             Capability::Batch,
             Capability::Custom("draft/chathistory"),
+            Capability::Custom("draft/message-redaction"),
+            Capability::Custom("labeled-response"),
+            Capability::Custom("draft/no-implicit-names"),
+            Capability::Custom("draft/pre-away"),
+            Capability::Custom("standard-replies"),
         ];
         if sasl_mechanism.is_some() {
             caps.push(Capability::Sasl);
@@ -160,7 +222,11 @@ pub fn connect(
             .iter()
             .map(|c| cap_to_name(c))
             .collect();
-        for cap in &caps {
+        // Space CAP REQs to avoid Excess Flood (Libera and others rate-limit).
+        for (i, cap) in caps.iter().enumerate() {
+            if i > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+            }
             let _ = client.send_cap_req(std::slice::from_ref(cap));
         }
 
@@ -235,6 +301,12 @@ pub fn connect(
                 if let IrcCommand::Response(code, _args) = &msg.command {
                     match code {
                         Response::RPL_SASLSUCCESS | Response::ERR_SASLFAIL => {
+                            let pre_away_acked = acked_caps.iter().any(|c| c == "draft/pre-away");
+                            if pre_away_acked {
+                                if let Some(ref msg) = initial_away {
+                                    let _ = client.send(IrcCommand::AWAY(Some(msg.clone())));
+                                }
+                            }
                             let _ = client.send(IrcCommand::CAP(
                                 None,
                                 CapSubCommand::END,
@@ -310,9 +382,12 @@ fn batch_message_to_line(msg: &irc::proto::Message) -> Option<(String, MessageLi
         _ => return None,
     };
     let account = account_from_tags(msg.tags.as_ref()).unwrap_or(None);
+    let msgid = msgid_from_tags(msg.tags.as_ref());
+    let reply_to_msgid = reply_to_msgid_from_tags(msg.tags.as_ref());
+    let is_bot_sender = has_bot_tag(msg.tags.as_ref());
     Some((
         target.clone(),
-        MessageLine { source, text, kind, image_id: None, timestamp, account },
+        MessageLine { source, text, kind, image_id: None, timestamp, account, msgid, reply_to_msgid, is_bot_sender },
     ))
 }
 
@@ -321,6 +396,36 @@ fn account_from_tags(tags: Option<&Vec<irc::proto::message::Tag>>) -> Option<Opt
     let tags = tags?;
     let v = tags.iter().find(|t| t.0 == "account").and_then(|t| t.1.as_deref())?;
     Some(if v == "*" { None } else { Some(v.to_string()) })
+}
+
+/// Extract msgid from message tags (IRCv3 message-ids).
+fn msgid_from_tags(tags: Option<&Vec<irc::proto::message::Tag>>) -> Option<String> {
+    let tags = tags?;
+    tags.iter().find(|t| t.0 == "msgid").and_then(|t| t.1.as_ref()).map(|s| s.clone())
+}
+
+/// Extract +draft/channel-context from message tags (channel to display a DM in).
+fn channel_context_from_tags(tags: Option<&Vec<irc::proto::message::Tag>>) -> Option<String> {
+    let tags = tags?;
+    tags.iter()
+        .find(|t| t.0 == "+draft/channel-context" || t.0.eq_ignore_ascii_case("channel-context"))
+        .and_then(|t| t.1.as_ref())
+        .filter(|v| v.starts_with('#') || v.starts_with('&'))
+        .map(|s| s.clone())
+}
+
+/// Check for bot tag (IRCv3 bot-mode). Presence indicates sender is a bot.
+fn has_bot_tag(tags: Option<&Vec<irc::proto::message::Tag>>) -> bool {
+    tags.map_or(false, |tags| tags.iter().any(|t| t.0.eq_ignore_ascii_case("bot")))
+}
+
+/// Extract +reply target msgid from message tags (IRCv3 reply client tag).
+fn reply_to_msgid_from_tags(tags: Option<&Vec<irc::proto::message::Tag>>) -> Option<String> {
+    let tags = tags?;
+    tags.iter()
+        .find(|t| t.0 == "+reply" || t.0.eq_ignore_ascii_case("reply"))
+        .and_then(|t| t.1.as_ref())
+        .map(|s| s.clone())
 }
 
 /// Extract server-time from message tags (IRCv3 server-time). Returns None if absent or parse fails.
@@ -361,21 +466,32 @@ fn message_line(msg: &irc::proto::Message) -> Option<(String, MessageLine)> {
     let target = format_message_target(msg).unwrap_or_else(|| "*server*".to_string());
     let timestamp = server_time_from_tags(msg.tags.as_ref());
     let account = account_from_tags(msg.tags.as_ref()).unwrap_or(None);
+    let msgid = msgid_from_tags(msg.tags.as_ref());
+    let reply_to_msgid = reply_to_msgid_from_tags(msg.tags.as_ref());
+    let is_bot_sender = has_bot_tag(msg.tags.as_ref());
     Some((
         target,
-        MessageLine { source, text, kind, image_id: None, timestamp, account },
+        MessageLine { source, text, kind, image_id: None, timestamp, account, msgid, reply_to_msgid, is_bot_sender },
     ))
 }
 
 
 /// Run the IRC stream in a loop and send parsed messages to `tx`.
 /// Call this from a tokio task; it runs until the stream ends.
-/// `server` identifies this connection; `our_nick` detects our own JOIN for chathistory.
-pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, server: String, our_nick: Option<String>) {
+/// `server` identifies this connection; `host` for STS policy; `use_tls` whether connection is secure.
+pub async fn run_stream(
+    mut stream: ClientStream,
+    tx: IrcMessageTx,
+    server: String,
+    host: String,
+    use_tls: bool,
+    our_nick: Option<String>,
+) {
     use irc::proto::command::BatchSubCommand;
     use futures_util::StreamExt;
-    let mut pending_users: HashMap<String, Vec<String>> = HashMap::new();
+    let mut pending_users: HashMap<String, (Vec<String>, Vec<(String, String)>)> = HashMap::new();
     let mut chathistory_batches: HashMap<String, (String, Vec<MessageLine>)> = HashMap::new();
+    let mut netsplit_batches: HashMap<String, (Vec<String>, usize, bool)> = HashMap::new(); // id -> (server_names, count, is_netjoin)
     let mut pending_list: Vec<(String, Option<u32>)> = Vec::new();
     #[derive(Default)]
     struct PendingWhois {
@@ -404,11 +520,35 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, server: Stri
                         {
                             let target = params.as_ref().unwrap()[0].clone();
                             chathistory_batches.insert(id, (target, Vec::new()));
+                        } else if matches!(subcmd, Some(BatchSubCommand::NETSPLIT | BatchSubCommand::NETJOIN)) {
+                            let servers = params.as_deref().unwrap_or_default().to_vec();
+                            let is_netjoin = matches!(subcmd, Some(BatchSubCommand::NETJOIN));
+                            netsplit_batches.insert(id, (servers, 0, is_netjoin));
                         }
                     } else if batch_id.starts_with('-') {
                         let id = batch_id[1..].to_string();
                         if let Some((target, lines)) = chathistory_batches.remove(&id) {
                             let _ = tx.send(IrcMessage::ChathistoryBatch { server: server.clone(), target, lines });
+                        } else if let Some((servers, count, is_netjoin)) = netsplit_batches.remove(&id) {
+                            let servers_str = servers.join(" ");
+                            let label = if is_netjoin { "Netjoin" } else { "Netsplit" };
+                            let text = format!("{}: {} ({} user{})", label, servers_str, count, if count == 1 { "" } else { "s" });
+                            let line = MessageLine {
+                                source: "*".to_string(),
+                                text,
+                                kind: MessageKind::Other,
+                                image_id: None,
+                                timestamp: None,
+                                account: None,
+                                msgid: None,
+                                reply_to_msgid: None,
+                                is_bot_sender: false,
+                            };
+                            let _ = tx.send(IrcMessage::Line {
+                                server: server.clone(),
+                                target: "*server*".to_string(),
+                                line,
+                            });
                         }
                     }
                 }
@@ -425,7 +565,40 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, server: Stri
                         continue;
                     }
                 }
+                // QUIT/JOIN with batch= tag: collect for netsplit/netjoin, skip normal handling
+                if let Some(ref bid) = in_chathistory_batch {
+                    if let Some((_servers, ref mut count, is_netjoin)) = netsplit_batches.get_mut(bid) {
+                        let nick = prefix_nick(msg.prefix.as_ref());
+                        let matches_batch = (*is_netjoin && matches!(&msg.command, C::JOIN(..)))
+                            || (!*is_netjoin && matches!(&msg.command, C::QUIT(_)));
+                        if matches_batch && !nick.is_empty() && nick != "*" {
+                            *count += 1;
+                        }
+                        continue;
+                    }
+                }
 
+                if matches!(&msg.command, C::CAP(_, CapSubCommand::LS, _, _) | C::CAP(_, CapSubCommand::LIST, _, _) | C::CAP(_, CapSubCommand::NEW, _, _)) {
+                    let list = match &msg.command {
+                        C::CAP(_, _, multi, params) => params.as_deref().or_else(|| multi.as_deref()).unwrap_or(""),
+                        _ => "",
+                    };
+                    if use_tls {
+                        if let Some((port, duration)) = crate::sts::find_sts_in_cap_list(list) {
+                            let _ = tx.send(IrcMessage::StsPolicyReceived {
+                                host: host.clone(),
+                                port,
+                                duration_secs: duration,
+                            });
+                        }
+                    } else if let Some(sts_port) = crate::sts::find_sts_upgrade_port(list) {
+                        let _ = tx.send(IrcMessage::StsUpgradeRequired {
+                            server: server.clone(),
+                            host: host.clone(),
+                            port: sts_port,
+                        });
+                    }
+                }
                 if let C::CAP(_, CapSubCommand::ACK, multi, params) = &msg.command {
                     let acked = params.as_deref().or_else(|| multi.as_deref()).unwrap_or("");
                     let caps: Vec<String> = acked.split_whitespace().map(|c| c.to_lowercase()).collect();
@@ -440,36 +613,97 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, server: Stri
                         let _ = tx.send(IrcMessage::CapsNak { server: server.clone(), caps });
                     }
                 }
+                if let C::CAP(_, CapSubCommand::NEW, multi, params) = &msg.command {
+                    let cap_str = params.as_deref().or_else(|| multi.as_deref()).unwrap_or("");
+                    let caps: Vec<String> = cap_str.split_whitespace().map(|c| c.to_lowercase()).collect();
+                    if !caps.is_empty() {
+                        let _ = tx.send(IrcMessage::CapsChanged {
+                            server: server.clone(),
+                            added: caps,
+                            removed: vec![],
+                        });
+                    }
+                }
+                if let C::CAP(_, CapSubCommand::DEL, multi, params) = &msg.command {
+                    let cap_str = params.as_deref().or_else(|| multi.as_deref()).unwrap_or("");
+                    let caps: Vec<String> = cap_str.split_whitespace().map(|c| c.to_lowercase()).collect();
+                    if !caps.is_empty() {
+                        let _ = tx.send(IrcMessage::CapsChanged {
+                            server: server.clone(),
+                            added: vec![],
+                            removed: caps,
+                        });
+                    }
+                }
+
+                // standard-replies: FAIL, WARN, NOTE — <type> <command> <code> [context...] :<description>
+                if let C::Raw(ref cmd, ref args) = &msg.command {
+                    if args.len() >= 3
+                        && matches!(
+                            cmd.as_str(),
+                            "FAIL" | "WARN" | "NOTE"
+                        )
+                    {
+                        let kind = match cmd.as_str() {
+                            "FAIL" => StandardReplyKind::Fail,
+                            "WARN" => StandardReplyKind::Warn,
+                            _ => StandardReplyKind::Note,
+                        };
+                        let command = args[0].clone();
+                        let code = args[1].clone();
+                        let description = args.last().cloned().unwrap_or_default();
+                        let _ = tx.send(IrcMessage::StandardReply {
+                            server: server.clone(),
+                            kind,
+                            command,
+                            code,
+                            description,
+                        });
+                    } else if cmd.eq_ignore_ascii_case("REDACT") && args.len() >= 2 {
+                        let target = args[0].clone();
+                        let msgid = args[1].clone();
+                        let _ = tx.send(IrcMessage::MessageRedacted {
+                            server: server.clone(),
+                            target,
+                            msgid,
+                        });
+                    }
+                }
 
                 match &msg.command {
                     C::Response(Response::RPL_NAMREPLY, args) => {
                         if args.len() >= 4 {
                             let channel = args[2].clone();
                             // multi-prefix + userhost-in-names: entries are @%+nick!user@host; parse to prefix+nick for display
-                            let nicks: Vec<String> = args[3]
-                                .split_whitespace()
-                                .map(|s| {
-                                    let s = s.trim();
-                                    let prefix_end = s
-                                        .bytes()
-                                        .take_while(|b| *b == b'@' || *b == b'%' || *b == b'+')
-                                        .count();
-                                    let (prefix, rest) = s.split_at(prefix_end);
-                                    let nick = rest.split('!').next().unwrap_or(rest);
-                                    format!("{}{}", prefix, nick)
-                                })
-                                .collect();
-                            pending_users
-                                .entry(channel)
-                                .or_default()
-                                .extend(nicks);
+                            let mut entries: Vec<(String, Option<(String, String)>)> = Vec::new();
+                            for s in args[3].split_whitespace() {
+                                let s = s.trim();
+                                let prefix_end = s
+                                    .bytes()
+                                    .take_while(|b| matches!(b, b'~' | b'&' | b'@' | b'%' | b'+' | b'!' | b'.'))
+                                    .count();
+                                let (prefix, rest) = s.split_at(prefix_end);
+                                let (display, userhost) = if let Some(idx) = rest.find('!') {
+                                    let nick = &rest[..idx];
+                                    let userhost = rest[idx + 1..].to_string();
+                                    (format!("{}{}", prefix, nick), Some((nick.to_lowercase(), userhost)))
+                                } else {
+                                    (format!("{}{}", prefix, rest), None)
+                                };
+                                entries.push((display, userhost));
+                            }
+                            let users: Vec<String> = entries.iter().map(|(u, _)| u.clone()).collect();
+                            let userhosts: Vec<(String, String)> = entries.iter().filter_map(|(_, uh)| uh.clone()).collect();
+                            let (all_users, all_userhosts) = pending_users.entry(channel).or_default();
+                            all_users.extend(users);
+                            all_userhosts.extend(userhosts);
                         }
                     }
                     C::Response(Response::RPL_ENDOFNAMES, args) => {
                         if args.len() >= 2 {
                             let channel = args[1].clone();
-                            if let Some(users) = pending_users.remove(&channel) {
-                                let _ = tx.send(IrcMessage::UserList { server: server.clone(), channel, users });
+                            if let Some((users, userhosts)) = pending_users.remove(&channel) {
+                                let _ = tx.send(IrcMessage::UserList { server: server.clone(), channel, users, userhosts });
                             }
                         }
                     }
@@ -618,10 +852,51 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, server: Stri
                             let _ = tx.send(IrcMessage::FriendAway { server: server.clone(), nick, away });
                         }
                     }
-                    C::INVITE(ref _nick, ref channel) => {
+                    C::Raw(ref cmd, ref args) if cmd.eq_ignore_ascii_case("ACCOUNT") => {
+                        let nick = prefix_nick(msg.prefix.as_ref());
+                        if !nick.is_empty() && nick != "*" {
+                            let account = args.first().and_then(|a| {
+                                if a == "*" { None } else { Some(a.clone()) }
+                            });
+                            let _ = tx.send(IrcMessage::AccountUpdate {
+                                server: server.clone(),
+                                nick,
+                                account,
+                            });
+                        }
+                    }
+                    C::Raw(ref cmd, ref args) if cmd.eq_ignore_ascii_case("CHGHOST") => {
+                        let nick = prefix_nick(msg.prefix.as_ref());
+                        if !nick.is_empty() && args.len() >= 2 {
+                            let new_user = args[0].clone();
+                            let new_host = args[1].clone();
+                            let _ = tx.send(IrcMessage::ChgHost {
+                                server: server.clone(),
+                                nick,
+                                new_user,
+                                new_host,
+                            });
+                        }
+                    }
+                    C::Raw(ref cmd, ref args) if cmd.eq_ignore_ascii_case("SETNAME") => {
+                        let nick = prefix_nick(msg.prefix.as_ref());
+                        if !nick.is_empty() {
+                            let realname = args.first().map(|s| s.strip_prefix(':').unwrap_or(s).to_string()).unwrap_or_default();
+                            if !realname.is_empty() {
+                                let _ = tx.send(IrcMessage::Setname {
+                                    server: server.clone(),
+                                    nick,
+                                    realname,
+                                });
+                            }
+                        }
+                    }
+                    C::INVITE(ref target, ref channel) => {
+                        let inviter = prefix_nick(msg.prefix.as_ref());
                         let _ = tx.send(IrcMessage::Invite {
                             server: server.clone(),
-                            nick: prefix_nick(msg.prefix.as_ref()),
+                            inviter,
+                            target: target.clone(),
                             channel: channel.clone(),
                         });
                     }
@@ -639,6 +914,7 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, server: Stri
                             )));
                         }
                         if let (Some(target), Some(tags)) = (target_opt, tags_opt) {
+                            let mut handled = false;
                             for tag in tags.iter() {
                                 if tag.0 == "+typing" {
                                     if let Some(ref status) = tag.1 {
@@ -651,7 +927,34 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, server: Stri
                                             });
                                         }
                                     }
+                                    handled = true;
                                     break;
+                                }
+                            }
+                            if !handled {
+                                let reply_to = tags.iter().find(|t| t.0 == "+reply" || t.0.eq_ignore_ascii_case("reply")).and_then(|t| t.1.as_ref()).cloned();
+                                let react = tags.iter().find(|t| t.0.ends_with("draft/react")).and_then(|t| t.1.as_ref()).cloned();
+                                let unreact = tags.iter().find(|t| t.0.ends_with("draft/unreact")).and_then(|t| t.1.as_ref()).cloned();
+                                if let Some(msgid) = reply_to {
+                                    if let Some(emoji) = react {
+                                        let _ = tx.send(IrcMessage::Reaction {
+                                            server: server.clone(),
+                                            target: target.clone(),
+                                            msgid: msgid.clone(),
+                                            nick: nick.clone(),
+                                            emoji: emoji.clone(),
+                                            unreact: false,
+                                        });
+                                    } else if let Some(emoji) = unreact {
+                                        let _ = tx.send(IrcMessage::Reaction {
+                                            server: server.clone(),
+                                            target: target.clone(),
+                                            msgid: msgid.clone(),
+                                            nick: nick.clone(),
+                                            emoji: emoji.clone(),
+                                            unreact: true,
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -662,9 +965,19 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, server: Stri
                                 let source = prefix_nick(msg.prefix.as_ref());
                                 let timestamp = server_time_from_tags(msg.tags.as_ref());
                                 let account = account_from_tags(msg.tags.as_ref()).unwrap_or(None);
+                                let msgid = msgid_from_tags(msg.tags.as_ref());
+                                let reply_to_msgid = reply_to_msgid_from_tags(msg.tags.as_ref());
+                                let is_bot_sender = has_bot_tag(msg.tags.as_ref());
+                                let action_target = if !target.starts_with('#') && !target.starts_with('&')
+                                    && our_nick.as_ref().map_or(false, |n| target.eq_ignore_ascii_case(n))
+                                {
+                                    channel_context_from_tags(msg.tags.as_ref()).unwrap_or_else(|| target.clone())
+                                } else {
+                                    target.clone()
+                                };
                                 let _ = tx.send(IrcMessage::Line {
                                     server: server.clone(),
-                                    target: target.clone(),
+                                    target: action_target,
                                     line: MessageLine {
                                         source,
                                         text: data,
@@ -672,6 +985,9 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, server: Stri
                                         image_id: None,
                                         timestamp,
                                         account,
+                                        msgid,
+                                        reply_to_msgid,
+                                        is_bot_sender,
                                     },
                                 });
                             } else if matches!(tag.as_str(), "VERSION" | "PING" | "TIME") {
@@ -692,19 +1008,42 @@ pub async fn run_stream(mut stream: ClientStream, tx: IrcMessageTx, server: Stri
                 let should_skip_line = matches!(&msg.command, C::PRIVMSG(_, t) if parse_ctcp(t).is_some())
                     || matches!(&msg.command, C::Response(_, _))
                     || matches!(&msg.command, C::AWAY(_))
-                    || matches!(&msg.command, C::Raw(ref cmd, _) if cmd.eq_ignore_ascii_case("TAGMSG"));
+                    || matches!(&msg.command, C::Raw(ref cmd, _) if cmd.eq_ignore_ascii_case("TAGMSG"))
+                    || matches!(&msg.command, C::Raw(ref cmd, _) if cmd.eq_ignore_ascii_case("ACCOUNT"))
+                    || matches!(&msg.command, C::Raw(ref cmd, _) if cmd.eq_ignore_ascii_case("CHGHOST"))
+                    || matches!(&msg.command, C::Raw(ref cmd, _) if cmd.eq_ignore_ascii_case("SETNAME"))
+                    || matches!(&msg.command, C::Raw(ref cmd, _) if matches!(cmd.as_str(), "FAIL" | "WARN" | "NOTE"));
                 if !should_skip_line {
                     if let Some((target, line)) = message_line(&msg) {
+                        let effective_target = if !target.starts_with('#') && !target.starts_with('&')
+                            && our_nick.as_ref().map_or(false, |n| target.eq_ignore_ascii_case(n))
+                        {
+                            channel_context_from_tags(msg.tags.as_ref()).unwrap_or(target)
+                        } else {
+                            target.clone()
+                        };
                         let _ = tx.send(IrcMessage::Line {
                             server: server.clone(),
-                            target: target.clone(),
+                            target: effective_target,
                             line: line.clone(),
                         });
                         match &msg.command {
-                            C::JOIN(chan, _, _) => {
+                            C::JOIN(chan, account_opt, realname_opt) => {
                                 let _ = tx.send(IrcMessage::JoinedChannel { server: server.clone(), channel: chan.clone() });
                                 if our_nick.as_deref() == Some(prefix_nick(msg.prefix.as_ref()).as_str()) {
                                     let _ = tx.send(IrcMessage::RequestChathistory { server: server.clone(), target: chan.clone() });
+                                }
+                                // extended-join: exactly 3 params (channel, account, realname) — not channel+key
+                                if let (Some(acc), Some(_)) = (account_opt, realname_opt) {
+                                    let nick = prefix_nick(msg.prefix.as_ref());
+                                    if !nick.is_empty() && nick != "*" {
+                                        let account = if acc == "*" { None } else { Some(acc.clone()) };
+                                        let _ = tx.send(IrcMessage::AccountUpdate {
+                                            server: server.clone(),
+                                            nick,
+                                            account,
+                                        });
+                                    }
                                 }
                             }
                             C::PART(chan, _) => {

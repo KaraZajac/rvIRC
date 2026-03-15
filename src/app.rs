@@ -42,6 +42,13 @@ pub struct MessageLine {
     pub timestamp: Option<chrono::DateTime<chrono::Local>>,
     /// IRCv3 account-tag: account name when sender is logged in (None = not logged in or unknown).
     pub account: Option<String>,
+    /// IRCv3 message-ids: server-provided unique ID for this message (enables reply threading).
+    #[allow(dead_code)] // Stored for future reply-send and threading UI
+    pub msgid: Option<String>,
+    /// IRCv3 reply tag: msgid of the message this is replying to (client-only +reply tag).
+    pub reply_to_msgid: Option<String>,
+    /// bot-mode: sender has set bot mode (from message tags).
+    pub is_bot_sender: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +139,8 @@ pub struct App {
     /// DM targets per server (server -> nicks).
     pub dm_targets_per_server: HashMap<String, Vec<String>>,
     pub messages: HashMap<String, Vec<MessageLine>>,
+    /// draft/react: msgid -> [(nick, emoji)] for reactions displayed on messages.
+    pub reactions: HashMap<String, Vec<(String, String)>>,
 
     /// :search popup: filter, results (index, preview), selection.
     pub search_popup_visible: bool,
@@ -175,6 +184,10 @@ pub struct App {
 
     /// Message area scroll: 0 = show latest; increase when user scrolls up (see older).
     pub message_scroll_offset: usize,
+    /// When set, next sent PRIVMSG will include +reply tag with this msgid (IRCv3 reply).
+    pub reply_to_msgid: Option<String>,
+    /// (server, target) for which we've sent CHATHISTORY BEFORE and are waiting for batch.
+    pub chathistory_before_pending: Option<(String, String)>,
 
     /// Servers that need auto_join run (Connected received, channels from config).
     pub pending_auto_join_servers: HashSet<String>,
@@ -187,6 +200,12 @@ pub struct App {
     pub channel_modes: HashMap<String, String>,
     /// Last invite: "nick invited you to #channel" for status/join.
     pub last_invite: Option<(String, String)>,
+    /// account-notify/account-tag/extended-join: (server, nick) -> account (None = logged out).
+    pub account_per_nick: HashMap<(String, String), Option<String>>,
+    /// userhost-in-names: (server, nick) -> user@host for user list display.
+    pub userhost_per_nick: HashMap<(String, String), String>,
+    /// bot-mode: (server, nick) -> true if we've seen a message with bot tag from this nick.
+    pub bot_per_nick: std::collections::HashSet<(String, String)>,
     /// Muted nicks per channel. Key = "server/target" or "server/*" for global, value = set of nicks.
     pub muted_nicks: HashMap<String, std::collections::HashSet<String>>,
 
@@ -261,6 +280,8 @@ pub struct App {
     pub status_message: String,
     /// Current away message (None = not away).
     pub away_message: Option<String>,
+    /// Yellow away popup visible; any key dismisses and clears away.
+    pub away_popup_visible: bool,
 
     /// Whether to fetch and render inline images for image URLs (from config).
     pub render_images: bool,
@@ -363,6 +384,7 @@ impl App {
             current_nickname: None,
             dm_targets_per_server: HashMap::new(),
             messages: HashMap::new(),
+            reactions: HashMap::new(),
             search_popup_visible: false,
             search_filter: String::new(),
             search_results: Vec::new(),
@@ -386,6 +408,8 @@ impl App {
             license_popup_visible: false,
             license_popup_scroll_offset: 0,
             message_scroll_offset: 0,
+            reply_to_msgid: None,
+            chathistory_before_pending: None,
             acked_caps_per_server: HashMap::new(),
             requested_caps_per_server: HashMap::new(),
             created_at: Instant::now(),
@@ -394,6 +418,9 @@ impl App {
             channel_topics: HashMap::new(),
             channel_modes: HashMap::new(),
             last_invite: None,
+            account_per_nick: HashMap::new(),
+            userhost_per_nick: HashMap::new(),
+            bot_per_nick: std::collections::HashSet::new(),
             muted_nicks: HashMap::new(),
             input_history: Vec::new(),
             input_history_index: 0,
@@ -437,6 +464,7 @@ impl App {
             file_browser_pending_nick: String::new(),
             status_message: String::new(),
             away_message: None,
+            away_popup_visible: false,
 
             render_images: true,
             offline_friends: None,
@@ -688,7 +716,10 @@ impl App {
                 kind: MessageKind::Other,
                 image_id: None,
                 timestamp: None,
-                account: None,
+                            account: None,
+                            msgid: None,
+                            reply_to_msgid: None,
+                            is_bot_sender: false,
             },
         );
     }
@@ -781,8 +812,11 @@ impl App {
         self.clamp_channel_index();
     }
 
-    pub fn set_user_list(&mut self, users: Vec<String>) {
+    pub fn set_user_list(&mut self, server: &str, users: Vec<String>, userhosts: Vec<(String, String)>) {
         self.user_list = users;
+        for (nick, userhost) in userhosts {
+            self.userhost_per_nick.insert((server.to_string(), nick), userhost);
+        }
         self.sort_user_list();
         if self.user_index >= self.user_list.len() && !self.user_list.is_empty() {
             self.user_index = self.user_list.len().saturating_sub(1);

@@ -51,6 +51,10 @@ pub enum CommandResult {
     Verified(String),
     SendFile { nick: String, path: String },
     Clear,
+    Reply,
+    React(String), // emoji for draft/react
+    Redact { msgid: Option<String>, reason: Option<String> },
+    FetchMoreHistory,
     Search,
     Highlight,
     Ignore(String),
@@ -307,6 +311,29 @@ pub fn parse(line: &str) -> CommandResult {
             CommandResult::SendFile { nick, path }
         }
         "clear" => CommandResult::Clear,
+        "reply" => CommandResult::Reply,
+        "react" => {
+            let emoji = rest.trim();
+            if emoji.is_empty() {
+                CommandResult::StatusMessage("Usage: :react <emoji> (select message with r first)".to_string())
+            } else {
+                CommandResult::React(emoji.to_string())
+            }
+        }
+        "redact" => {
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            let first = parts.next().unwrap_or("").trim();
+            let reason = parts.next().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+            let msgid = if first.is_empty() {
+                None
+            } else if first.starts_with("msgid=") {
+                Some(first.trim_start_matches("msgid=").to_string())
+            } else {
+                Some(first.to_string())
+            };
+            CommandResult::Redact { msgid, reason }
+        }
+        "more" | "history" => CommandResult::FetchMoreHistory,
         "search" => CommandResult::Search,
         "highlight" => CommandResult::Highlight,
         "away" => {

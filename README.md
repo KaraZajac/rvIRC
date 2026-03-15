@@ -29,10 +29,18 @@
 | **IRC: away-notify** | Friends list away status (yellow vs green) |
 | **IRC: message-tags** | Typing indicators, server-time in PRIVMSG tags |
 | **IRC: server-time** | Timestamps on messages when server provides `time` tag |
-| **IRC: batch** | Batching for chathistory responses |
+| **IRC: batch** | Batching for chathistory; netsplit/netjoin batches collapsed into summary lines |
 | **IRC: draft/chathistory** | Chat history on channel join |
+| **IRC: draft/pre-away** | Sends AWAY before registration on reconnect if you were away |
+| **IRC: standard-replies** | FAIL/WARN/NOTE from server shown as structured messages (red/yellow/dim) |
+| **IRC: reply** | `r` or `:reply` to reply to last message; sends with +reply tag (IRCv3 reply) |
+| **IRC: chathistory scroll-back** | Page Up at top or `:more` fetches older messages (CHATHISTORY BEFORE) |
+| **IRC: STS** | Persists STS policies from secure connections; forces TLS on future connects |
 | **IRC: echo-message** | When server acks: server echoes our messages; else rvIRC local-echoes |
 | **IRC: sasl** | SASL PLAIN or EXTERNAL (when `sasl_mechanism` set in server config) |
+| **IRC: userhost-in-names** | User list shows ident@host when available |
+| **IRC: bot-mode** | Bot users shown with [bot] in user list and message headers |
+| **IRC: draft/channel-context** | DMs from bots with channel context appear in the channel buffer |
 
 ## Build & run
 
@@ -64,6 +72,8 @@ Type `:` to enter COMMAND mode, then run any of these (case-insensitive):
 | `ban [channel] <mask>` | Set ban mask on channel (e.g. `*!*@host` or `nick!*@*`) |
 | `unban [channel] <mask>` | Remove ban mask |
 | `away [message]` | Set away status; no message clears it |
+| `reply` | Reply to last message with msgid (press `i` to type, Enter to send) |
+| `more` / `history` | Fetch older messages in current channel/DM (CHATHISTORY BEFORE) |
 | `notifications on` / `off` | Enable or disable desktop notifications |
 | `mute` / `unmute` | Mute or unmute notification sound |
 | `search` | Search in current buffer (popup) |

@@ -16,8 +16,15 @@ const USERS_PANE_WIDTH: u16 = 18;
 
 /// Deterministic color for a nick (same nick → same color). Uses a hash of the nick.
 /// Color for message source (nick or ***). System sources use dim gray.
+/// Standard-replies: [FAIL] red, [WARN] yellow, [NOTE] dim.
 fn source_color(source: &str) -> Color {
     if source == "***" || source.is_empty() {
+        Color::DarkGray
+    } else if source == "[FAIL]" {
+        Color::Red
+    } else if source == "[WARN]" {
+        Color::Yellow
+    } else if source == "[NOTE]" {
         Color::DarkGray
     } else {
         nick_color(source)
@@ -174,6 +181,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.file_browser_visible {
         draw_file_browser_popup(f, area, app);
     }
+    if app.away_popup_visible {
+        draw_away_popup(f, area, app);
+    }
 }
 
 pub const IMAGE_DISPLAY_HEIGHT: u16 = 14;
@@ -204,7 +214,12 @@ fn wrap_str_at_width(s: &str, max_width: usize) -> Vec<String> {
     segments
 }
 
-pub fn message_wrapped_height(m: &MessageLine, _current_nick: Option<&str>, width: u16) -> u16 {
+pub fn message_wrapped_height(
+    m: &MessageLine,
+    _current_nick: Option<&str>,
+    width: u16,
+    reactions: &std::collections::HashMap<String, Vec<(String, String)>>,
+) -> u16 {
     if width == 0 {
         return 2; // header + at least 1 message line
     }
@@ -213,7 +228,13 @@ pub fn message_wrapped_height(m: &MessageLine, _current_nick: Option<&str>, widt
     let w = width as usize;
     let msg_width = stripped.width();
     let msg_lines = ((msg_width + w - 1) / w).max(1);
-    1 + msg_lines as u16
+    let mut h = 1 + msg_lines as u16;
+    if let Some(ref msgid) = m.msgid {
+        if reactions.get(msgid).map_or(false, |v| !v.is_empty()) {
+            h += 1; // draft/react line
+        }
+    }
+    h
 }
 
 fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
@@ -282,7 +303,7 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
     let nick_ref = app.current_nickname.as_deref();
     let mut item_heights: Vec<u16> = Vec::with_capacity(messages.len());
     for m in &messages {
-        let text_h = message_wrapped_height(m, nick_ref, inner.width);
+        let text_h = message_wrapped_height(m, nick_ref, inner.width, &app.reactions);
         let h = match m.image_id {
             Some(id) if app.inline_images.contains_key(&id) => text_h + IMAGE_DISPLAY_HEIGHT,
             Some(_) => text_h + 1,
@@ -352,9 +373,9 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
         }
         let m = &messages[i];
         let elapsed_ms = std::time::Instant::now().duration_since(app.created_at).as_millis() as u64;
-        let text_h = message_wrapped_height(m, nick.as_deref(), inner.width);
+        let text_h = message_wrapped_height(m, nick.as_deref(), inner.width, &app.reactions);
         let avail_text_h = text_h.min(max_y.saturating_sub(cur_y));
-        let content = format_message_line_wrapped(m, nick.as_deref(), &app.highlight_words, inner.width, elapsed_ms);
+        let content = format_message_line_wrapped(m, nick.as_deref(), &app.highlight_words, &app.reactions, inner.width, elapsed_ms);
         let text_rect = Rect { x: inner.x, y: cur_y, width: inner.width, height: avail_text_h };
         f.render_widget(
             Paragraph::new(content).wrap(Wrap { trim: true }),
@@ -402,10 +423,12 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
 
 /// Format a message line: header "nick | HH:mm" then message on following lines.
 /// Nick gets a deterministic color. Parses IRC formatting (bold, italic, etc.) for the message.
+/// Appends draft/react reactions if present.
 fn format_message_line_wrapped(
     m: &MessageLine,
     current_nick: Option<&str>,
     highlight_words: &[String],
+    reactions: &std::collections::HashMap<String, Vec<(String, String)>>,
     width: u16,
     elapsed_ms: u64,
 ) -> Text<'static> {
@@ -419,11 +442,15 @@ fn format_message_line_wrapped(
         !nick.is_empty() && m.text.to_lowercase().contains(&nick.to_lowercase())
     });
     let account_prefix = m.account.as_ref().map(|a| format!("[{}] ", a)).unwrap_or_default();
+    let bot_prefix = if m.is_bot_sender { "[bot] " } else { "" };
+    let reply_indicator = m.reply_to_msgid.as_ref().map(|_| " ↷").unwrap_or_default();
     let header_line = Line::from(vec![
         Span::styled(account_prefix, Style::default().add_modifier(Modifier::DIM)),
+        Span::styled(bot_prefix, Style::default().fg(Color::Cyan)),
         Span::styled(m.source.clone(), header_style),
         Span::raw(" | "),
         Span::styled(time_str, Style::default().add_modifier(Modifier::DIM)),
+        Span::styled(reply_indicator, Style::default().add_modifier(Modifier::DIM)),
     ]);
     // Message body: IRC formatting, highlights, rainbow, etc.
     let mut msg_spans = crate::format::parse_message_with_rainbow(&m.text, elapsed_ms);
@@ -439,6 +466,21 @@ fn format_message_line_wrapped(
     let mut all_lines = vec![header_line];
     for line in msg_lines {
         all_lines.push(line);
+    }
+    // draft/react: show reactions under the message
+    if let Some(ref msgid) = m.msgid {
+        if let Some(reacts) = reactions.get(msgid) {
+            if !reacts.is_empty() {
+                let react_str: String = reacts.iter()
+                    .map(|(nick, emoji)| format!(" {} {}", emoji, nick))
+                    .collect::<Vec<_>>()
+                    .join("");
+                all_lines.push(Line::from(Span::styled(
+                    format!("   ↷ {}", react_str.trim_start()),
+                    Style::default().add_modifier(Modifier::DIM).fg(Color::Cyan),
+                )));
+            }
+        }
     }
     Text::from(all_lines)
 }
@@ -658,8 +700,14 @@ fn user_prefix_style(entry: &str) -> Style {
     }
 }
 
+/// Strip channel prefixes (~&@%+!.) from a user list entry to get the nick.
+fn user_list_nick(entry: &str) -> &str {
+    entry.trim_start_matches(|c: char| matches!(c, '~' | '&' | '@' | '%' | '+' | '!' | '.'))
+}
+
 fn draw_users_pane(f: &mut Frame, area: Rect, app: &App) {
     let show_selector = app.panel_focus == PanelFocus::Users;
+    let server = app.current_server.as_deref().unwrap_or("");
     let items: Vec<ListItem> = app
         .user_list
         .iter()
@@ -667,9 +715,29 @@ fn draw_users_pane(f: &mut Frame, area: Rect, app: &App) {
         .map(|(i, u)| {
             let prefix = if show_selector && i == app.user_index { "> " } else { "  " };
             let role_style = user_prefix_style(u);
+            let nick = user_list_nick(u);
+            let account_suffix = app
+                .account_per_nick
+                .get(&(server.to_string(), nick.to_lowercase()))
+                .and_then(|a| a.as_ref())
+                .map(|a| format!(" ({})", a))
+                .unwrap_or_default();
+            let userhost_suffix = app
+                .userhost_per_nick
+                .get(&(server.to_string(), nick.to_lowercase()))
+                .map(|h| format!(" [{}]", h))
+                .unwrap_or_default();
+            let bot_suffix = if app.bot_per_nick.contains(&(server.to_string(), nick.to_lowercase())) {
+                " [bot]"
+            } else {
+                ""
+            };
             let line = Line::from(vec![
                 Span::raw(prefix),
                 Span::styled(u.as_str(), role_style),
+                Span::styled(account_suffix, Style::default().add_modifier(Modifier::DIM)),
+                Span::styled(userhost_suffix, Style::default().add_modifier(Modifier::DIM)),
+                Span::styled(bot_suffix, Style::default().fg(Color::Cyan)),
                 Span::raw("  "),
             ]);
             ListItem::new(line)
@@ -974,6 +1042,46 @@ fn draw_channel_list_popup(f: &mut Frame, area: Rect, app: &App) {
         .with_selected(Some(app.channel_list_selected_index))
         .with_offset(offset);
     f.render_stateful_widget(list, list_area, &mut list_state);
+}
+
+fn draw_away_popup(f: &mut Frame, area: Rect, app: &App) {
+    let reason = app.away_message.as_deref().unwrap_or("");
+    let popup_width = 40;
+    let popup_height = 5;
+    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
+    let popup_rect = Rect {
+        x,
+        y,
+        width: popup_width,
+        height: popup_height,
+    };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(2), Constraint::Length(1)])
+        .margin(1)
+        .split(popup_rect);
+
+    f.render_widget(Clear, popup_rect);
+    let yellow_style = Style::default().fg(Color::Yellow);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" AWAY ")
+        .style(yellow_style);
+    f.render_widget(block, popup_rect);
+
+    let text = if reason.is_empty() {
+        "Away".to_string()
+    } else {
+        reason.to_string()
+    };
+    let para = Paragraph::new(text)
+        .style(yellow_style)
+        .wrap(Wrap { trim: true });
+    f.render_widget(para, chunks[0]);
+
+    let hint = Paragraph::new("Any key to cancel").style(yellow_style.add_modifier(Modifier::DIM));
+    f.render_widget(hint, chunks[1]);
 }
 
 fn draw_highlight_popup(f: &mut Frame, area: Rect, app: &App) {
