@@ -8,7 +8,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
-use ratatui_image::StatefulImage;
+use ratatui_image::{Resize, StatefulImage};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const CHANNELS_PANE_WIDTH: u16 = 22;
@@ -186,7 +186,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 }
 
-pub const IMAGE_DISPLAY_HEIGHT: u16 = 14;
+pub const IMAGE_DISPLAY_HEIGHT: u16 = 20;
 
 /// Break a string at character boundaries so no line exceeds max_width display columns.
 fn wrap_str_at_width(s: &str, max_width: usize) -> Vec<String> {
@@ -396,7 +396,7 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
                 let img_h = IMAGE_DISPLAY_HEIGHT.min(max_y.saturating_sub(cur_y));
                 if img_h > 0 {
                     let img_rect = Rect { x: inner.x, y: cur_y, width: inner.width, height: img_h };
-                    let image_widget = StatefulImage::default();
+                    let image_widget = StatefulImage::default().resize(Resize::Scale(None));
                     f.render_stateful_widget(image_widget, img_rect, protocol);
                     cur_y += img_h;
                 }
@@ -612,8 +612,9 @@ fn target_display_label_for_entry(server: &str, target: &str) -> String {
 fn draw_channels_pane(f: &mut Frame, area: Rect, app: &App) {
     use crate::app::msg_key;
     let show_selector = app.panel_focus == PanelFocus::Channels;
-    let list = app.channels_list();
-    let items: Vec<ListItem> = list
+    let channels_list = app.channels_list();
+    let list_len = channels_list.len();
+    let items: Vec<ListItem> = channels_list
         .iter()
         .enumerate()
         .map(|(i, (s, t))| {
@@ -673,14 +674,28 @@ fn draw_channels_pane(f: &mut Frame, area: Rect, app: &App) {
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(" Servers & Channels "))
         .style(Style::default());
-    f.render_widget(list, area);
+    let visible = area.height.saturating_sub(2) as usize;
+    let list_len = list_len;
+    let offset = if list_len <= visible || visible == 0 {
+        0
+    } else {
+        (app.channel_index + 1)
+            .saturating_sub(visible)
+            .min(list_len.saturating_sub(visible))
+            .max(0)
+    };
+    let mut state = ListState::default()
+        .with_selected(Some(app.channel_index))
+        .with_offset(offset);
+    f.render_stateful_widget(list, area, &mut state);
 }
 
 fn draw_messages_pane(f: &mut Frame, area: Rect, app: &App) {
     use crate::app::msg_key;
     let show_selector = app.panel_focus == PanelFocus::Messages;
-    let list = app.messages_list();
-    let items: Vec<ListItem> = list
+    let messages_list = app.messages_list();
+    let list_len = messages_list.len();
+    let items: Vec<ListItem> = messages_list
         .iter()
         .enumerate()
         .map(|(i, (s, nick))| {
@@ -729,7 +744,19 @@ fn draw_messages_pane(f: &mut Frame, area: Rect, app: &App) {
     let list = List::new(items)
         .block(Block::default().borders(Borders::ALL).title(" Messages "))
         .style(Style::default());
-    f.render_widget(list, area);
+    let visible = area.height.saturating_sub(2) as usize;
+    let offset = if list_len <= visible || visible == 0 {
+        0
+    } else {
+        (app.messages_index + 1)
+            .saturating_sub(visible)
+            .min(list_len.saturating_sub(visible))
+            .max(0)
+    };
+    let mut state = ListState::default()
+        .with_selected(Some(app.messages_index))
+        .with_offset(offset);
+    f.render_stateful_widget(list, area, &mut state);
 }
 
 /// Style for a user list entry based on channel prefix (op, halfop, voice, etc.).
@@ -871,6 +898,8 @@ fn draw_user_action_menu(f: &mut Frame, app: &App, nick: &str) {
         width: menu_width,
         height: menu_height,
     };
+    f.render_widget(Clear, menu_rect);
+    let popup_style = popup_overlay_style();
     let actions = App::user_actions();
     let items: Vec<ListItem> = actions
         .iter()
@@ -889,9 +918,10 @@ fn draw_user_action_menu(f: &mut Frame, app: &App, nick: &str) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(format!(" {} ", nick)),
+                .title(format!(" {} ", nick))
+                .style(popup_style),
         )
-        .style(Style::default());
+        .style(popup_style);
     let visible = menu_rect.height.saturating_sub(2) as usize;
     let len = actions.len();
     let offset = if len <= visible {

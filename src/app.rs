@@ -192,6 +192,8 @@ pub struct App {
     pub reply_to_msgid: Option<String>,
     /// Reply-select mode: r pressed, waiting for 1-9 or 0 to pick which message to reply to.
     pub reply_select_mode: bool,
+    /// Recently sent (server, target, text) for deduplication with ZNC/bouncer echo (avoids duplicate when client nick differs).
+    pub recent_sents: Vec<(String, String, String, std::time::Instant)>,
     /// (server, target) for which we've sent CHATHISTORY BEFORE and are waiting for batch.
     pub chathistory_before_pending: Option<(String, String)>,
 
@@ -418,6 +420,7 @@ impl App {
             message_scroll_offset: 0,
             reply_to_msgid: None,
             reply_select_mode: false,
+            recent_sents: Vec::new(),
             chathistory_before_pending: None,
             acked_caps_per_server: HashMap::new(),
             requested_caps_per_server: HashMap::new(),
@@ -683,6 +686,24 @@ impl App {
         map
     }
 
+    /// Record a recently sent message for ZNC/bouncer deduplication (client nick may differ from echoed source).
+    pub fn record_recent_send(&mut self, server: &str, target: &str, text: &str) {
+        let now = std::time::Instant::now();
+        self.recent_sents.push((server.to_string(), target.to_string(), text.to_string(), now));
+        self.recent_sents.retain(|(_, _, _, t)| now.duration_since(*t).as_secs() < 5);
+        if self.recent_sents.len() > 20 {
+            self.recent_sents.drain(0..self.recent_sents.len() - 20);
+        }
+    }
+
+    /// True if this received message matches a recent send (dedupe ZNC echo when client nick differs).
+    pub fn is_recent_sent(&self, server: &str, effective_target: &str, text: &str) -> bool {
+        let now = std::time::Instant::now();
+        self.recent_sents.iter().any(|(s, t, m, ts)| {
+            s == server && t == effective_target && m == text && now.duration_since(*ts).as_secs() < 5
+        })
+    }
+
     /// Update search_results from current_messages filtered by search_filter (case-insensitive).
     pub fn update_search_results(&mut self) {
         let server = self.current_server.as_deref().unwrap_or("");
@@ -856,6 +877,19 @@ impl App {
         if self.user_index >= self.user_list.len() && !self.user_list.is_empty() {
             self.user_index = self.user_list.len().saturating_sub(1);
         }
+    }
+
+    /// Set user list for a DM: just the DM target and ourselves.
+    pub fn set_user_list_for_dm(&mut self, dm_nick: &str) {
+        let mut list = vec![dm_nick.to_string()];
+        if let Some(ref our_nick) = self.current_nickname {
+            if !our_nick.eq_ignore_ascii_case(dm_nick) {
+                list.push(our_nick.clone());
+            }
+        }
+        self.user_list = list;
+        self.user_list_filter.clear();
+        self.user_index = 0;
     }
 
     /// Display title for the current message target (for Messages window title).

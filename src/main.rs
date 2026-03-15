@@ -571,10 +571,17 @@ fn apply_irc_message(
                     spawn_image_download(url, image_id, irc_tx, rt);
                 }
             }
-            // Skip echoed self-messages when we have echo-message: we already showed our message via push_self_message with correct reply_to.
-            let is_echo_from_us = app.current_nickname.as_ref().map_or(false, |n| line.source.eq_ignore_ascii_case(n));
-            let has_echo = app.acked_caps_per_server.get(&server).map_or(false, |s| s.contains("echo-message"));
-            if is_echo_from_us && has_echo {
+            let effective_target = if target == app.current_nickname.as_deref().unwrap_or("") {
+                line.source.clone()
+            } else {
+                target.clone()
+            };
+            if app.is_recent_sent(&server, &effective_target, &line.text) {
+                return;
+            }
+            if app.current_nickname.as_ref().map_or(false, |n| line.source.eq_ignore_ascii_case(n))
+                && app.acked_caps_per_server.get(&server).map_or(false, |s| s.contains("echo-message"))
+            {
                 return;
             }
             let (effective_target, source, text) = if target == app.current_nickname.as_deref().unwrap_or("") {
@@ -1004,6 +1011,7 @@ fn handle_key_action(
                 app.save_current_read_marker();
                 app.current_server = Some(server.clone());
                 app.current_channel = Some(nick.clone());
+                app.set_user_list_for_dm(&nick);
                 app.mark_target_read(&server, &nick);
                 app.restore_read_marker_for(&server, &nick);
                 app.panel_focus = PanelFocus::Main;
@@ -1019,6 +1027,7 @@ fn handle_key_action(
                     app.save_current_read_marker();
                     app.current_server = Some(server.clone());
                     app.current_channel = Some(nick.clone());
+                    app.set_user_list_for_dm(&nick);
                     app.mark_target_read(&server, &nick);
                     app.restore_read_marker_for(&server, &nick);
                     app.panel_focus = PanelFocus::Main;
@@ -1045,6 +1054,7 @@ fn handle_key_action(
                 }
                 app.save_current_read_marker();
                 app.current_channel = Some(nick.clone());
+                app.set_user_list_for_dm(&nick);
                 app.mark_target_read(&server, &nick);
                 app.restore_read_marker_for(&server, &nick);
                 app.sync_channel_index_to_current();
@@ -2251,10 +2261,21 @@ fn run_command(
                             app.clamp_messages_index();
                             if app.current_channel.as_ref() == Some(&target) {
                                 app.save_current_read_marker();
-                                if let Some((s, t)) = app.messages_list().first().cloned()
-                                    .or_else(|| app.channels_list().first().cloned()) {
+                                // Prefer another DM over switching to self-DM when closing a DM
+                                let messages = app.messages_list();
+                                let next_dm = messages.iter()
+                                    .find(|(_, n)| app.current_nickname.as_ref().map_or(true, |me| !n.eq_ignore_ascii_case(me)))
+                                    .cloned()
+                                    .or_else(|| messages.first().cloned());
+                                if let Some((s, t)) = next_dm.or_else(|| app.channels_list().first().cloned()) {
                                     app.current_server = Some(s.clone());
                                     app.current_channel = Some(t.clone());
+                                    if !t.starts_with('#') && !t.starts_with('&') && t != "*server*" {
+                                        app.set_user_list_for_dm(&t);
+                                    } else {
+                                        app.user_list.clear();
+                                        app.user_list_filter.clear();
+                                    }
                                     app.sync_channel_index_to_current();
                                     app.restore_read_marker_for(&s, &t);
                                 }
@@ -2286,6 +2307,9 @@ fn run_command(
                     if let Some((s, t)) = app.selected_channel_entry().or_else(|| app.selected_message_entry()) {
                         app.current_server = Some(s.clone());
                         app.current_channel = Some(t.clone());
+                        if !t.starts_with('#') && !t.starts_with('&') && t != "*server*" {
+                            app.set_user_list_for_dm(&t);
+                        }
                         app.restore_read_marker_for(&s, &t);
                     }
                 } else {
@@ -2294,10 +2318,21 @@ fn run_command(
                             dms.retain(|x| x != &target);
                             app.clamp_messages_index();
                             app.save_current_read_marker();
-                            if let Some((s, t)) = app.messages_list().first().cloned()
-                                .or_else(|| app.channels_list().first().cloned()) {
+                            // Prefer another DM over switching to self-DM when closing a DM
+                            let messages = app.messages_list();
+                            let next_dm = messages.iter()
+                                .find(|(_, n)| app.current_nickname.as_ref().map_or(true, |me| !n.eq_ignore_ascii_case(me)))
+                                .cloned()
+                                .or_else(|| messages.first().cloned());
+                            if let Some((s, t)) = next_dm.or_else(|| app.channels_list().first().cloned()) {
                                 app.current_server = Some(s.clone());
                                 app.current_channel = Some(t.clone());
+                                if !t.starts_with('#') && !t.starts_with('&') && t != "*server*" {
+                                    app.set_user_list_for_dm(&t);
+                                } else {
+                                    app.user_list.clear();
+                                    app.user_list_filter.clear();
+                                }
                             }
                             app.sync_channel_index_to_current();
                             if let (Some(s), Some(t)) = (app.current_server.clone(), app.current_channel.clone()) {
@@ -2570,6 +2605,7 @@ fn run_command(
                 }
                 app.save_current_read_marker();
                 app.current_channel = Some(nick.clone());
+                app.set_user_list_for_dm(&nick);
                 app.mark_target_read(&server, &nick);
                 app.sync_channel_index_to_current();
                 app.restore_read_marker_for(&server, &nick);
@@ -2692,6 +2728,12 @@ fn run_command(
         R::SwitchChannel(ch) => {
             app.save_current_read_marker();
             app.current_channel = Some(ch.clone());
+            if !ch.starts_with('#') && !ch.starts_with('&') && ch != "*server*" {
+                app.set_user_list_for_dm(&ch);
+            } else {
+                app.user_list.clear();
+                app.user_list_filter.clear();
+            }
             if let Some(server) = app.current_server.clone() {
                 app.mark_target_read(&server, &ch);
                 app.sync_channel_index_to_current();
@@ -3094,6 +3136,8 @@ fn run_command(
             };
             if nick.is_empty() {
                 app.status_message = "Usage: :secure <nick> (or use in a DM)".to_string();
+            } else if app.current_nickname.as_ref().map_or(false, |n| n.eq_ignore_ascii_case(&nick)) {
+                app.status_message = "Cannot establish secure session with yourself.".to_string();
             } else if let (Some(server), Some((ref c, _))) = (app.current_server.clone(), app.current_server.as_ref().and_then(|s| clients.get(s.as_str()))) {
                 let ephemeral = crypto::Keypair::generate();
                 let ephemeral_pub_b64 = ephemeral.public_key_b64();
@@ -3121,6 +3165,8 @@ fn run_command(
             };
             if nick.is_empty() {
                 app.status_message = "Usage: :unsecure <nick> (or use in a DM)".to_string();
+            } else if app.current_nickname.as_ref().map_or(false, |n| n.eq_ignore_ascii_case(&nick)) {
+                app.status_message = "Cannot use :unsecure with yourself.".to_string();
             } else if let Some(server) = app.current_server.clone() {
                 let sec_key = app::msg_key(&server, &nick);
                 if app.secure_sessions.remove(&sec_key).is_some() {
@@ -3141,6 +3187,8 @@ fn run_command(
             };
             if nick.is_empty() {
                 app.status_message = "Usage: :sendfile <nick> <path> (or use in a DM)".to_string();
+            } else if app.current_nickname.as_ref().map_or(false, |n| n.eq_ignore_ascii_case(&nick)) {
+                app.status_message = "Cannot send file to yourself.".to_string();
             } else if app.current_server.as_ref().and_then(|s| clients.get(s)).is_none() {
                 app.status_message = "Not connected.".to_string();
             } else if path.is_empty() {
@@ -3196,6 +3244,8 @@ fn run_command(
             };
             if nick.is_empty() {
                 app.status_message = "Usage: :verify <nick> (or use in a DM)".to_string();
+            } else if app.current_nickname.as_ref().map_or(false, |n| n.eq_ignore_ascii_case(&nick)) {
+                app.status_message = "Cannot verify identity with yourself.".to_string();
             } else if let Some(server) = app.current_server.clone() {
                 let sec_key = app::msg_key(&server, &nick);
                 if let Some(session) = app.secure_sessions.get(&sec_key) {
@@ -3220,6 +3270,8 @@ fn run_command(
             };
             if nick.is_empty() {
                 app.status_message = "Usage: :verified <nick> (or use in a DM)".to_string();
+            } else if app.current_nickname.as_ref().map_or(false, |n| n.eq_ignore_ascii_case(&nick)) {
+                app.status_message = "Cannot mark yourself as verified.".to_string();
             } else if let Some(server) = app.current_server.clone() {
                 if app.known_keys.set_verified(&nick, &server) {
                     if let Some(ref path) = app.known_keys_path {
@@ -3337,6 +3389,7 @@ fn push_self_message(
             spawn_image_download(url, line.image_id.unwrap(), irc_tx, rt);
         }
     }
+    app.record_recent_send(server, target, &line.text);
     app.push_message(server, target, line);
 }
 
