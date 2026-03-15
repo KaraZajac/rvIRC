@@ -589,7 +589,7 @@ fn draw_channels_pane(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(" Channels "))
+        .block(Block::default().borders(Borders::ALL).title(" Servers & Channels "))
         .style(Style::default());
     f.render_widget(list, area);
 }
