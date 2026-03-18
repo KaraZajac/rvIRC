@@ -69,6 +69,12 @@ pub enum CommandResult {
     Pass { service: Option<String>, password: String },
     /// Send raw IRC command. :raw PRIVMSG NickServ :IDENTIFY mypass
     Raw(String),
+    /// Change own realname via IRCv3 SETNAME command.
+    Setname(String),
+    /// Register an account via draft/account-registration (REGISTER * <email> <password>).
+    Register { email: String, password: String },
+    /// Request ban list for a channel (:bans or :banlist [#channel]).
+    Banlist(Option<String>),
     NoOp,
     Unknown(String),
 }
@@ -401,6 +407,33 @@ pub fn parse(line: &str) -> CommandResult {
         "mute" => CommandResult::Mute,
         "unmute" => CommandResult::Unmute,
         "debug-typing" => CommandResult::DebugTyping,
+        "setname" => {
+            if rest.is_empty() {
+                CommandResult::StatusMessage("Usage: :setname <new realname>".to_string())
+            } else {
+                CommandResult::Setname(rest.to_string())
+            }
+        }
+        "register" => {
+            let mut parts = rest.splitn(2, char::is_whitespace);
+            let email = parts.next().unwrap_or("").to_string();
+            let password = parts.next().unwrap_or("").trim().to_string();
+            if email.is_empty() || password.is_empty() {
+                CommandResult::StatusMessage("Usage: :register <email> <password>".to_string())
+            } else {
+                CommandResult::Register { email, password }
+            }
+        }
+        "banlist" | "bans" => {
+            let ch = rest.split_whitespace().next().map(|s| {
+                if s.starts_with('#') || s.starts_with('&') {
+                    s.to_string()
+                } else {
+                    format!("#{}", s)
+                }
+            });
+            CommandResult::Banlist(ch)
+        }
         _ => CommandResult::Unknown(format!("Unknown command: {}", cmd)),
     }
 }

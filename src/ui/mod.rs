@@ -158,6 +158,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_whois_popup(f, area, app);
     }
 
+    if app.ban_popup_visible {
+        draw_ban_popup(f, area, app);
+    }
+
     if app.credits_popup_visible {
         draw_credits_popup(f, area);
     }
@@ -1452,6 +1456,71 @@ fn draw_whois_popup(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(para, chunks[0]);
 
     let hint = Paragraph::new("Esc / Enter / q to close").style(popup_style.add_modifier(Modifier::DIM));
+    f.render_widget(hint, chunks[1]);
+}
+
+fn draw_ban_popup(f: &mut Frame, area: Rect, app: &App) {
+    let popup_width = (area.width * 3 / 4).min(80).max(40);
+    let popup_height = (area.height * 3 / 4).min(24).max(8);
+    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
+    let popup_rect = Rect { x, y, width: popup_width, height: popup_height };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(2), Constraint::Length(1)])
+        .margin(1)
+        .split(popup_rect);
+
+    let title = if app.ban_popup_channel.is_empty() {
+        " Ban List ".to_string()
+    } else {
+        format!(" Ban List: {} ", app.ban_popup_channel)
+    };
+
+    f.render_widget(Clear, popup_rect);
+    let popup_style = popup_overlay_style();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .style(popup_style);
+    f.render_widget(block, popup_rect);
+
+    let inner_height = chunks[0].height as usize;
+    let entries = &app.ban_popup_entries;
+    let scroll = app.ban_popup_scroll.min(entries.len().saturating_sub(1));
+    let visible: Vec<String> = if entries.is_empty() {
+        vec!["(no bans)".to_string()]
+    } else {
+        entries.iter()
+            .enumerate()
+            .skip(scroll)
+            .take(inner_height)
+            .map(|(i, mask)| {
+                // Pretty-print $a:account extbans.
+                let display = if let Some(account) = mask.strip_prefix("$a:") {
+                    format!("account:{}", account)
+                } else if mask == "$a" {
+                    "account:(any authenticated)".to_string()
+                } else {
+                    mask.clone()
+                };
+                format!("{:3}. {}", i + 1, display)
+            })
+            .collect()
+    };
+    let text = visible.join("\n");
+    let para = Paragraph::new(text)
+        .style(popup_style)
+        .wrap(Wrap { trim: false });
+    f.render_widget(para, chunks[0]);
+
+    let hint_text = if entries.len() > inner_height {
+        format!("j/k scroll · {} entries · Esc/q to close", entries.len())
+    } else {
+        "Esc / q to close".to_string()
+    };
+    let hint = Paragraph::new(hint_text).style(popup_style.add_modifier(Modifier::DIM));
     f.render_widget(hint, chunks[1]);
 }
 

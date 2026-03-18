@@ -73,6 +73,8 @@ pub enum IrcMessage {
     MonOnline { server: String, nicks: Vec<String> },
     /// MONITOR 731: nicks went offline.
     MonOffline { server: String, nicks: Vec<String> },
+    /// MONITOR 734: monitor list full, targets could not be added.
+    MonListFull { server: String, limit: String, targets: String },
     /// away-notify: nick set or cleared away status. away=true if away, false if back.
     FriendAway { server: String, nick: String, away: bool },
     /// account-notify: nick logged in (Some) or out (None).
@@ -114,6 +116,18 @@ pub enum IrcMessage {
         emoji: String,
         unreact: bool,
     },
+    /// WHOX (354): extended WHO result — nick, user, host, optional account.
+    WhoxResult { server: String, nick: String, user: String, host: String, account: Option<String> },
+    /// RPL_ISUPPORT (005): server advertises UTF8ONLY token.
+    IsupportUtf8Only { server: String },
+    /// draft/read-marker: MARKREAD sync from server (another client moved read position).
+    ReadMarker { server: String, target: String, timestamp: String },
+    /// draft/channel-rename: channel was renamed in-place (no part/rejoin needed).
+    ChannelRenamed { server: String, old: String, new: String, reason: Option<String> },
+    /// RPL_BANLIST (367) + RPL_ENDOFBANLIST (368): full ban list for a channel.
+    BanList { server: String, channel: String, entries: Vec<String> },
+    /// draft/account-registration: result of REGISTER command (920/927/928 numerics).
+    RegisterResult { server: String, success: bool, message: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,6 +228,11 @@ pub fn connect(
             Capability::Custom("draft/no-implicit-names"),
             Capability::Custom("draft/pre-away"),
             Capability::Custom("standard-replies"),
+            Capability::Custom("setname"),
+            Capability::Custom("extended-monitor"),
+            Capability::Custom("draft/multiline"),
+            Capability::Custom("draft/read-marker"),
+            Capability::Custom("draft/account-registration"),
         ];
         if sasl_mechanism.is_some() {
             caps.push(Capability::Sasl);
@@ -284,7 +303,9 @@ pub fn connect(
                         if sasl_acked && data.trim() == "+" {
                             match mechanism.as_str() {
                                 "plain" => {
-                                    let creds = format!("\0{}\0{}", nick, sasl_pass);
+                                    // RFC 4616 / IRCv3: message = [authzid] NUL authcid NUL passwd
+                                    // Use authzid=authcid=nick per IRCv3 spec example (jilles\0jilles\0sesame)
+                                    let creds = format!("{}\0{}\0{}", nick, nick, sasl_pass);
                                     let b64 = base64::engine::general_purpose::STANDARD
                                         .encode(creds.as_bytes());
                                     let _ = client.send(IrcCommand::AUTHENTICATE(b64));
@@ -493,6 +514,7 @@ pub async fn run_stream(
     let mut chathistory_batches: HashMap<String, (String, Vec<MessageLine>)> = HashMap::new();
     let mut netsplit_batches: HashMap<String, (Vec<String>, usize, bool)> = HashMap::new(); // id -> (server_names, count, is_netjoin)
     let mut pending_list: Vec<(String, Option<u32>)> = Vec::new();
+    let mut pending_bans: HashMap<String, Vec<String>> = HashMap::new();
     #[derive(Default)]
     struct PendingWhois {
         nick: Option<String>,
@@ -667,6 +689,20 @@ pub async fn run_stream(
                             target,
                             msgid,
                         });
+                    } else if cmd.eq_ignore_ascii_case("MARKREAD") && !args.is_empty() {
+                        // draft/read-marker: MARKREAD <target> [timestamp=<iso>]
+                        let target = args[0].clone();
+                        let timestamp = args.get(1)
+                            .and_then(|a| a.strip_prefix("timestamp="))
+                            .unwrap_or("")
+                            .to_string();
+                        let _ = tx.send(IrcMessage::ReadMarker { server: server.clone(), target, timestamp });
+                    } else if cmd.eq_ignore_ascii_case("RENAME") && args.len() >= 2 {
+                        // draft/channel-rename: RENAME <old> <new> [reason]
+                        let old = args[0].clone();
+                        let new = args[1].clone();
+                        let reason = args.get(2).map(|s| s.clone());
+                        let _ = tx.send(IrcMessage::ChannelRenamed { server: server.clone(), old, new, reason });
                     }
                 }
 
@@ -791,6 +827,42 @@ pub async fn run_stream(
                         let list = std::mem::take(&mut pending_list);
                         let _ = tx.send(IrcMessage::ChannelList { server: server.clone(), list });
                     }
+                    // RPL_BANLIST (367): one entry in the ban list for a channel.
+                    C::Response(Response::RPL_BANLIST, args) => {
+                        if args.len() >= 3 {
+                            let channel = args[1].clone();
+                            let mask = args[2].clone();
+                            pending_bans.entry(channel).or_default().push(mask);
+                        }
+                    }
+                    // RPL_ENDOFBANLIST (368): end of ban list — send accumulated entries.
+                    C::Response(Response::RPL_ENDOFBANLIST, args) => {
+                        if args.len() >= 2 {
+                            let channel = args[1].clone();
+                            let entries = pending_bans.remove(&channel).unwrap_or_default();
+                            let _ = tx.send(IrcMessage::BanList { server: server.clone(), channel, entries });
+                        }
+                    }
+                    // RPL_WHOSPCRPL (354): WHOX extended WHO response.
+                    // Response is #[repr(u16)] so we cast to match the non-standard numeric.
+                    // Request format: WHO #chan %tuhnaf,token
+                    // Response args: [our_nick, token, user, host, nick, flags, account]
+                    C::Response(resp, args) if *resp as u16 == 354 => {
+                        if args.len() >= 6 {
+                            let nick = args[4].clone();
+                            let user = args[2].clone();
+                            let host = args[3].clone();
+                            let account_raw = args.get(6).cloned().unwrap_or_default();
+                            let account = if account_raw.is_empty() || account_raw == "0" || account_raw == "*" {
+                                None
+                            } else {
+                                Some(account_raw)
+                            };
+                            if !nick.is_empty() {
+                                let _ = tx.send(IrcMessage::WhoxResult { server: server.clone(), nick, user, host, account });
+                            }
+                        }
+                    }
                     C::Response(Response::RPL_TOPIC, args) => {
                         if args.len() >= 3 {
                             let channel = args[1].clone();
@@ -819,6 +891,14 @@ pub async fn run_stream(
                     C::Response(Response::ERR_NICKNAMEINUSE, _) => {
                         let _ = tx.send(IrcMessage::NickInUse { server: server.clone() });
                     }
+                    // RPL_MYINFO is 004; 005 is RPL_BOUNCE (RFC 2812) / RPL_ISUPPORT (modern).
+                    // Check for UTF8ONLY token in ISUPPORT burst.
+                    C::Response(Response::RPL_ISUPPORT, ref args) => {
+                        if args.iter().any(|a| a.eq_ignore_ascii_case("UTF8ONLY")) {
+                            let _ = tx.send(IrcMessage::IsupportUtf8Only { server: server.clone() });
+                        }
+                    }
+
                     C::Response(Response::RPL_MONONLINE, args) => {
                         if args.len() >= 2 {
                             let targets = args[1].strip_prefix(':').unwrap_or(&args[1]);
@@ -843,6 +923,17 @@ pub async fn run_stream(
                             if !nicks.is_empty() {
                                 let _ = tx.send(IrcMessage::MonOffline { server: server.clone(), nicks });
                             }
+                        }
+                    }
+                    C::Response(Response::ERR_MONLISTFULL, args) => {
+                        if args.len() >= 3 {
+                            let limit = args[1].clone();
+                            let targets = args[2].strip_prefix(':').unwrap_or(&args[2]).to_string();
+                            let _ = tx.send(IrcMessage::MonListFull {
+                                server: server.clone(),
+                                limit,
+                                targets,
+                            });
                         }
                     }
                     C::AWAY(ref away_msg) => {
@@ -1012,6 +1103,8 @@ pub async fn run_stream(
                     || matches!(&msg.command, C::Raw(ref cmd, _) if cmd.eq_ignore_ascii_case("ACCOUNT"))
                     || matches!(&msg.command, C::Raw(ref cmd, _) if cmd.eq_ignore_ascii_case("CHGHOST"))
                     || matches!(&msg.command, C::Raw(ref cmd, _) if cmd.eq_ignore_ascii_case("SETNAME"))
+                    || matches!(&msg.command, C::Raw(ref cmd, _) if cmd.eq_ignore_ascii_case("MARKREAD"))
+                    || matches!(&msg.command, C::Raw(ref cmd, _) if cmd.eq_ignore_ascii_case("RENAME"))
                     || matches!(&msg.command, C::Raw(ref cmd, _) if matches!(cmd.as_str(), "FAIL" | "WARN" | "NOTE"));
                 if !should_skip_line {
                     if let Some((target, line)) = message_line(&msg) {
