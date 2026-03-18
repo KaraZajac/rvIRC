@@ -887,6 +887,9 @@ fn apply_irc_message(
             app.friends_away.remove(&server);
             app.acked_caps_per_server.remove(&server);
             app.requested_caps_per_server.remove(&server);
+            app.isupport_network_name.remove(&server);
+            app.isupport_network_icon.remove(&server);
+            app.user_metadata.retain(|(s, _), _| s != &server);
             app.away_message = None;
             app.away_popup_visible = false;
             app.status_message = "Disconnected.".to_string();
@@ -1009,6 +1012,43 @@ fn apply_irc_message(
                 app.status_message = format!("Registration successful: {}", message);
             } else {
                 app.status_message = format!("Registration failed: {}", message);
+            }
+        }
+        M::IsupportNetworkInfo { server, network_name, network_icon } => {
+            if let Some(name) = network_name {
+                app.isupport_network_name.insert(server.clone(), name.clone());
+                app.push_message(&server, "*server*", MessageLine {
+                    source: "***".to_string(),
+                    text: format!("Network: {}", name),
+                    kind: MessageKind::Other,
+                    image_id: None,
+                    timestamp: None,
+                    account: None,
+                    msgid: None,
+                    reply_to_msgid: None,
+                    is_bot_sender: false,
+                });
+            }
+            if let Some(icon) = network_icon {
+                app.isupport_network_icon.insert(server.clone(), icon.clone());
+                app.push_message(&server, "*server*", MessageLine {
+                    source: "***".to_string(),
+                    text: format!("Network icon: {}", icon),
+                    kind: MessageKind::Other,
+                    image_id: None,
+                    timestamp: None,
+                    account: None,
+                    msgid: None,
+                    reply_to_msgid: None,
+                    is_bot_sender: false,
+                });
+            }
+        }
+        M::MetadataValue { server, target, key, value } => {
+            let entry = app.user_metadata.entry((server, target)).or_default();
+            match value {
+                Some(v) => { entry.insert(key, v); }
+                None => { entry.remove(&key); }
             }
         }
     }
@@ -1306,6 +1346,14 @@ fn handle_key_action(
                         app.user_action_menu = false;
                         if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                             let _ = c.send(IrcCommand::WHOIS(None, nick.to_string()));
+                            let server_str = app.current_server.as_deref().unwrap_or("");
+                            let meta_acked = app.acked_caps_per_server.get(server_str).map_or(false, |s| s.contains("draft/metadata"));
+                            if meta_acked {
+                                let _ = c.send(IrcCommand::Raw("METADATA".to_string(), vec![
+                                    nick.to_string(), "GET".to_string(),
+                                    "display-name".to_string(), "pronouns".to_string(), "avatar".to_string(),
+                                ]));
+                            }
                             app.whois_popup_visible = true;
                             app.whois_nick = nick.to_string();
                             app.whois_lines = vec!["Requesting whois...".to_string()];
@@ -2738,6 +2786,9 @@ fn run_command(
                 app.auto_join_after_per_server.remove(&server);
                 app.friends_online.remove(&server);
                 app.friends_away.remove(&server);
+                app.isupport_network_name.remove(&server);
+                app.isupport_network_icon.remove(&server);
+                app.user_metadata.retain(|(s, _), _| s != &server);
                 app.away_message = None;
                 app.away_popup_visible = false;
                 app.status_message = "Disconnected. Type :connect <server> to reconnect.".to_string();
@@ -3327,6 +3378,15 @@ fn run_command(
                 Some(n) if !n.is_empty() => {
                     if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                         let _ = c.send(IrcCommand::WHOIS(None, n.clone()));
+                        // If draft/metadata is acked, also request common metadata keys.
+                        let server_str = app.current_server.as_deref().unwrap_or("");
+                        let meta_acked = app.acked_caps_per_server.get(server_str).map_or(false, |s| s.contains("draft/metadata"));
+                        if meta_acked {
+                            let _ = c.send(IrcCommand::Raw("METADATA".to_string(), vec![
+                                n.clone(), "GET".to_string(),
+                                "display-name".to_string(), "pronouns".to_string(), "avatar".to_string(),
+                            ]));
+                        }
                         app.whois_popup_visible = true;
                         app.whois_nick = n;
                         app.whois_lines = vec!["Requesting whois...".to_string()];
@@ -3398,6 +3458,47 @@ fn run_command(
                 }
             } else {
                 app.status_message = "Usage: :bans [#channel]".to_string();
+            }
+        }
+        R::Metadata { target, subcommand, key, value } => {
+            let server = app.current_server.clone().unwrap_or_default();
+            let acked = app.acked_caps_per_server.get(&server).map_or(false, |s| s.contains("draft/metadata"));
+            if !acked {
+                app.status_message = "Server does not support metadata (draft/metadata cap not acked).".to_string();
+            } else if let Some((ref c, _)) = clients.get(&server) {
+                let actual_target = target.unwrap_or_else(|| app.current_nickname.clone().unwrap_or_else(|| "*".to_string()));
+                match subcommand.to_lowercase().as_str() {
+                    "list" => {
+                        let _ = c.send(IrcCommand::Raw("METADATA".to_string(), vec![actual_target, "LIST".to_string()]));
+                    }
+                    "get" => {
+                        if let Some(k) = key {
+                            let _ = c.send(IrcCommand::Raw("METADATA".to_string(), vec![actual_target, "GET".to_string(), k]));
+                        } else {
+                            app.status_message = "Usage: :metadata get <key>".to_string();
+                        }
+                    }
+                    "set" => {
+                        if let Some(k) = key {
+                            let v = value.unwrap_or_default();
+                            let _ = c.send(IrcCommand::Raw("METADATA".to_string(), vec![actual_target, "SET".to_string(), k, v]));
+                        } else {
+                            app.status_message = "Usage: :metadata set <key> [value]".to_string();
+                        }
+                    }
+                    "clear" => {
+                        if let Some(k) = key {
+                            let _ = c.send(IrcCommand::Raw("METADATA".to_string(), vec![actual_target, "CLEAR".to_string(), k]));
+                        } else {
+                            let _ = c.send(IrcCommand::Raw("METADATA".to_string(), vec![actual_target, "CLEAR".to_string()]));
+                        }
+                    }
+                    _ => {
+                        app.status_message = "Usage: :metadata [target] list|get|set|clear [key] [value]".to_string();
+                    }
+                }
+            } else {
+                app.status_message = "Not connected.".to_string();
             }
         }
         R::NoOp => {}
@@ -3574,7 +3675,7 @@ fn complete_input(app: &mut App) {
         "version", "credits", "license", "caps", "pass", "raw",
         "secure", "unsecure", "sendfile",
         "verify", "verified",
-        "setname", "register", "bans", "banlist",
+        "setname", "register", "bans", "banlist", "metadata",
         "whois", "more", "history", "highlight", "ignore", "unignore",
         "add-friend", "remove-friend", "friends",
         "notifications", "mute", "unmute",

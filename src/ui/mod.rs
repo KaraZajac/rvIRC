@@ -1445,11 +1445,38 @@ fn draw_whois_popup(f: &mut Frame, area: Rect, app: &App) {
         .style(popup_style);
     f.render_widget(block, popup_rect);
 
-    let text = if app.whois_lines.is_empty() {
-        "(no data)".to_string()
+    // Build text: whois lines + any cached metadata (display-name, pronouns, avatar).
+    let mut all_lines: Vec<String> = if app.whois_lines.is_empty() {
+        vec!["(no data)".to_string()]
     } else {
-        app.whois_lines.join("\n")
+        app.whois_lines.clone()
     };
+    if let Some(server) = app.current_server.as_deref() {
+        if let Some(meta) = app.user_metadata.get(&(server.to_string(), app.whois_nick.clone())) {
+            if !meta.is_empty() {
+                all_lines.push(String::new()); // blank separator
+                // Show well-known keys first, then any others.
+                let ordered = ["display-name", "pronouns", "avatar"];
+                for k in &ordered {
+                    if let Some(v) = meta.get(*k) {
+                        let label = match *k {
+                            "display-name" => "Display name",
+                            "pronouns" => "Pronouns",
+                            "avatar" => "Avatar",
+                            other => other,
+                        };
+                        all_lines.push(format!("{}: {}", label, v));
+                    }
+                }
+                for (k, v) in meta {
+                    if !ordered.contains(&k.as_str()) {
+                        all_lines.push(format!("{}: {}", k, v));
+                    }
+                }
+            }
+        }
+    }
+    let text = all_lines.join("\n");
     let para = Paragraph::new(text)
         .style(popup_style)
         .wrap(Wrap { trim: true });

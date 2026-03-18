@@ -52,6 +52,9 @@
 | **IRC: draft/multiline** | Pasting multi-line text sends it as a `draft/multiline` BATCH instead of separate messages |
 | **IRC: draft/account-registration** | `:register <email> <password>` sends a REGISTER command; result shown via FAIL/NOTE standard-replies |
 | **IRC: account-extban** | `:bans` / `:banlist` shows a scrollable ban-list popup; `$a:account` extbans are formatted as `[account: name]` |
+| **IRC: draft/extended-isupport** | Requests early ISUPPORT; `NETWORK=` token displayed in server pane on connect |
+| **IRC: draft/network-icon** | `NETWORKICON=` ISUPPORT token parsed and URL shown in server pane on connect |
+| **IRC: draft/metadata** | `:metadata` command to GET/SET/CLEAR/LIST key-value metadata; `display-name`, `pronouns`, and `avatar` fetched automatically on `:whois` and shown in the popup |
 
 ## Build & run
 
@@ -111,6 +114,10 @@ Type `:` to enter COMMAND mode, or `/` in the input bar (e.g. `/pass xyz`), then
 | `setname <realname>` | Change your IRC real name (requires `setname` cap) |
 | `register <email> <password>` | Register a new account on the server (requires `draft/account-registration` cap) |
 | `bans` / `banlist [#channel]` | Fetch and display the ban list for the current or specified channel in a popup |
+| `metadata [target] list` | List all metadata for target (default: own nick) |
+| `metadata [target] get <key>` | Get a specific metadata key |
+| `metadata [target] set <key> [value]` | Set or clear a metadata key |
+| `metadata [target] clear [key]` | Clear a specific key or all metadata for target |
 
 ## Keybindings
 
