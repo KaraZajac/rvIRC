@@ -524,6 +524,9 @@ pub async fn run_stream(
     use_tls: bool,
     our_nick: Option<String>,
 ) {
+    // our_nick is mutable so we can track the current nick across renames.
+    #[allow(unused_mut)]
+    let mut our_nick = our_nick;
     use irc::proto::command::BatchSubCommand;
     use futures_util::StreamExt;
     let mut pending_users: HashMap<String, (Vec<String>, Vec<(String, String)>)> = HashMap::new();
@@ -1003,6 +1006,14 @@ pub async fn run_stream(
                                 nick,
                                 account,
                             });
+                        }
+                    }
+                    C::NICK(ref new_nick_raw) => {
+                        // If it's our own nick being renamed, keep our_nick in sync so
+                        // PART/JOIN detection and DM-redirect logic stays accurate.
+                        let from_nick = prefix_nick(msg.prefix.as_ref());
+                        if our_nick.as_ref().map_or(false, |n| n.eq_ignore_ascii_case(&from_nick)) {
+                            our_nick = Some(new_nick_raw.clone());
                         }
                     }
                     C::Raw(ref cmd, ref args) if cmd.eq_ignore_ascii_case("CHGHOST") => {
