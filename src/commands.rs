@@ -75,6 +75,9 @@ pub enum CommandResult {
     Register { email: String, password: String },
     /// Request ban list for a channel (:bans or :banlist [#channel]).
     Banlist(Option<String>),
+    /// draft/metadata: GET/SET/CLEAR/LIST metadata for a target.
+    /// target=None means own nick; subcommand is "get"|"set"|"list"|"clear".
+    Metadata { target: Option<String>, subcommand: String, key: Option<String>, value: Option<String> },
     NoOp,
     Unknown(String),
 }
@@ -433,6 +436,34 @@ pub fn parse(line: &str) -> CommandResult {
                 }
             });
             CommandResult::Banlist(ch)
+        }
+        "metadata" => {
+            // :metadata [list|get|set|clear] [key] [value]
+            // :metadata <target> [list|get|set|clear] [key] [value]
+            let mut parts = rest.splitn(4, char::is_whitespace);
+            let a = parts.next().unwrap_or("").trim().to_string();
+            let b = parts.next().unwrap_or("").trim().to_string();
+            let c = parts.next().unwrap_or("").trim().to_string();
+            let d = parts.next().unwrap_or("").trim().to_string();
+            let sub_lower = a.to_lowercase();
+            if a.is_empty() || sub_lower == "list" || sub_lower == "get" || sub_lower == "set" || sub_lower == "clear" {
+                // :metadata [subcommand] [key] [value]  — own nick as target
+                let subcommand = if a.is_empty() { "list".to_string() } else { a };
+                let key = if b.is_empty() { None } else { Some(b) };
+                let value = if c.is_empty() { None } else { Some(c) };
+                CommandResult::Metadata { target: None, subcommand, key, value }
+            } else {
+                // :metadata <target> <subcommand> [key] [value]
+                let target = Some(a);
+                let sub2 = b.to_lowercase();
+                if sub2 == "list" || sub2 == "get" || sub2 == "set" || sub2 == "clear" {
+                    let key = if c.is_empty() { None } else { Some(c) };
+                    let value = if d.is_empty() { None } else { Some(d) };
+                    CommandResult::Metadata { target, subcommand: b, key, value }
+                } else {
+                    CommandResult::StatusMessage("Usage: :metadata [target] list|get|set|clear [key] [value]".to_string())
+                }
+            }
         }
         _ => CommandResult::Unknown(format!("Unknown command: {}", cmd)),
     }

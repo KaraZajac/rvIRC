@@ -128,6 +128,10 @@ pub enum IrcMessage {
     BanList { server: String, channel: String, entries: Vec<String> },
     /// draft/account-registration: result of REGISTER command (920/927/928 numerics).
     RegisterResult { server: String, success: bool, message: String },
+    /// draft/extended-isupport / draft/network-icon: NETWORK= and NETWORKICON= from RPL_ISUPPORT (005).
+    IsupportNetworkInfo { server: String, network_name: Option<String>, network_icon: Option<String> },
+    /// draft/metadata: server pushed a metadata key-value for a target (value=None means cleared).
+    MetadataValue { server: String, target: String, key: String, value: Option<String> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,6 +143,16 @@ pub enum StandardReplyKind {
 
 fn cap_to_name(c: &Capability) -> String {
     c.as_ref().to_lowercase()
+}
+
+/// Extract value from an ISUPPORT token like `KEY=value`, case-insensitive key match.
+fn isupport_val<'a>(token: &'a str, key: &str) -> Option<&'a str> {
+    let prefix_len = key.len() + 1; // "KEY="
+    if token.len() > prefix_len && token[..prefix_len].eq_ignore_ascii_case(&format!("{}=", key)) {
+        Some(&token[prefix_len..])
+    } else {
+        None
+    }
 }
 
 fn server_entry_to_irc_config(entry: &ServerEntry, rv: &RvConfig, sts_policies: &crate::sts::StsPolicies) -> IrcConfig {
@@ -233,6 +247,8 @@ pub fn connect(
             Capability::Custom("draft/multiline"),
             Capability::Custom("draft/read-marker"),
             Capability::Custom("draft/account-registration"),
+            Capability::Custom("draft/extended-isupport"),
+            Capability::Custom("draft/metadata"),
         ];
         if sasl_mechanism.is_some() {
             caps.push(Capability::Sasl);
@@ -703,6 +719,14 @@ pub async fn run_stream(
                         let new = args[1].clone();
                         let reason = args.get(2).map(|s| s.clone());
                         let _ = tx.send(IrcMessage::ChannelRenamed { server: server.clone(), old, new, reason });
+                    } else if cmd.eq_ignore_ascii_case("METADATA") && args.len() >= 3 {
+                        // draft/metadata: METADATA <target> <key> <visibility> [:<value>]
+                        // Server-pushed event when someone's metadata changes.
+                        let target = args[0].clone();
+                        let key = args[1].clone();
+                        // args[2] = visibility; args[3] = value (if present)
+                        let value = args.get(3).map(|v| v.clone());
+                        let _ = tx.send(IrcMessage::MetadataValue { server: server.clone(), target, key, value });
                     }
                 }
 
@@ -892,10 +916,35 @@ pub async fn run_stream(
                         let _ = tx.send(IrcMessage::NickInUse { server: server.clone() });
                     }
                     // RPL_MYINFO is 004; 005 is RPL_BOUNCE (RFC 2812) / RPL_ISUPPORT (modern).
-                    // Check for UTF8ONLY token in ISUPPORT burst.
                     C::Response(Response::RPL_ISUPPORT, ref args) => {
                         if args.iter().any(|a| a.eq_ignore_ascii_case("UTF8ONLY")) {
                             let _ = tx.send(IrcMessage::IsupportUtf8Only { server: server.clone() });
+                        }
+                        // draft/extended-isupport + draft/network-icon: extract NETWORK and NETWORKICON tokens.
+                        let mut network_name: Option<String> = None;
+                        let mut network_icon: Option<String> = None;
+                        for token in args.iter() {
+                            if let Some(val) = isupport_val(token, "NETWORK") {
+                                network_name = Some(val.to_string());
+                            } else if let Some(val) = isupport_val(token, "NETWORKICON") {
+                                network_icon = Some(val.to_string());
+                            }
+                        }
+                        if network_name.is_some() || network_icon.is_some() {
+                            let _ = tx.send(IrcMessage::IsupportNetworkInfo {
+                                server: server.clone(),
+                                network_name,
+                                network_icon,
+                            });
+                        }
+                    }
+                    // draft/metadata: 761 RPL_KEYVALUE — [client, target, key, visibility, value].
+                    C::Response(resp, ref args) if *resp as u16 == 761 => {
+                        if args.len() >= 5 {
+                            let target = args[1].clone();
+                            let key = args[2].clone();
+                            let value = Some(args[4].clone());
+                            let _ = tx.send(IrcMessage::MetadataValue { server: server.clone(), target, key, value });
                         }
                     }
 
@@ -1105,6 +1154,7 @@ pub async fn run_stream(
                     || matches!(&msg.command, C::Raw(ref cmd, _) if cmd.eq_ignore_ascii_case("SETNAME"))
                     || matches!(&msg.command, C::Raw(ref cmd, _) if cmd.eq_ignore_ascii_case("MARKREAD"))
                     || matches!(&msg.command, C::Raw(ref cmd, _) if cmd.eq_ignore_ascii_case("RENAME"))
+                    || matches!(&msg.command, C::Raw(ref cmd, _) if cmd.eq_ignore_ascii_case("METADATA"))
                     || matches!(&msg.command, C::Raw(ref cmd, _) if matches!(cmd.as_str(), "FAIL" | "WARN" | "NOTE"));
                 if !should_skip_line {
                     if let Some((target, line)) = message_line(&msg) {

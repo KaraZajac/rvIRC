@@ -319,6 +319,12 @@ pub struct App {
 
     /// Servers that advertised UTF8ONLY in their ISUPPORT (005) burst.
     pub utf8only_servers: HashSet<String>,
+    /// draft/extended-isupport: NETWORK= name per server from RPL_ISUPPORT (005).
+    pub isupport_network_name: HashMap<String, String>,
+    /// draft/network-icon: NETWORKICON= URL per server from RPL_ISUPPORT (005).
+    pub isupport_network_icon: HashMap<String, String>,
+    /// draft/metadata: (server, target) -> key -> value. Populated from server-pushed METADATA events and RPL_KEYVALUE (761).
+    pub user_metadata: HashMap<(String, String), HashMap<String, String>>,
     /// WHOX query token counter (1–999, wraps). Used to correlate WHO requests with responses.
     pub whox_token: u16,
 
@@ -505,6 +511,9 @@ impl App {
             typing_status: HashMap::new(),
             last_typing_sent: HashMap::new(),
             utf8only_servers: HashSet::new(),
+            isupport_network_name: HashMap::new(),
+            isupport_network_icon: HashMap::new(),
+            user_metadata: HashMap::new(),
             whox_token: 1,
             ban_popup_visible: false,
             ban_popup_channel: String::new(),
