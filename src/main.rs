@@ -610,7 +610,7 @@ fn apply_irc_message(
                     spawn_image_download(url, image_id, irc_tx, rt);
                 }
             }
-            let effective_target = if target == app.current_nickname.as_deref().unwrap_or("") {
+            let effective_target = if app.current_nickname.as_ref().map_or(false, |n| target.eq_ignore_ascii_case(n)) {
                 line.source.clone()
             } else {
                 target.clone()
@@ -623,7 +623,7 @@ fn apply_irc_message(
             {
                 return;
             }
-            let (effective_target, source, text) = if target == app.current_nickname.as_deref().unwrap_or("") {
+            let (effective_target, source, text) = if app.current_nickname.as_ref().map_or(false, |n| target.eq_ignore_ascii_case(n)) {
                 let dms = app.dm_targets_per_server.entry(server.to_string()).or_default();
                 if !dms.contains(&line.source) {
                     dms.push(line.source.clone());
@@ -642,6 +642,45 @@ fn apply_irc_message(
                 app.typing_status.retain(|(_, n, _), _| n != &source);
             } else if line.kind == MessageKind::Part {
                 app.typing_status.remove(&(server.clone(), source.clone(), effective_target.clone()));
+            } else if line.kind == MessageKind::Nick {
+                // Server confirmed a nick change. Extract new nick from "is now known as <new>" text.
+                // If it's our own nick, update current_nickname and our_nick-dependent state.
+                if let Some(new_nick) = line.text.strip_prefix("is now known as ") {
+                    let new_nick = new_nick.trim().to_string();
+                    if app.current_nickname.as_ref().map_or(false, |n| n.eq_ignore_ascii_case(&source)) {
+                        app.current_nickname = Some(new_nick.clone());
+                    }
+                    // Rename in DM targets so existing DM windows follow the nick change.
+                    if let Some(dms) = app.dm_targets_per_server.get_mut(&server) {
+                        for dm in dms.iter_mut() {
+                            if dm.eq_ignore_ascii_case(&source) {
+                                *dm = new_nick.clone();
+                                break;
+                            }
+                        }
+                    }
+                    // Move DM message history to the new nick key.
+                    let old_key = app::msg_key(&server, &source);
+                    let new_key = app::msg_key(&server, &new_nick);
+                    if let Some(history) = app.messages.remove(&old_key) {
+                        app.messages.entry(new_key.clone()).or_default().extend(history);
+                    }
+                    // Update current_channel if we're currently viewing this DM.
+                    if app.current_server.as_deref() == Some(server.as_str())
+                        && app.current_channel.as_ref().map_or(false, |c| c.eq_ignore_ascii_case(&source))
+                    {
+                        app.current_channel = Some(new_nick.clone());
+                    }
+                    // Update account/userhost caches.
+                    let old_cache_key = (server.clone(), source.to_lowercase());
+                    let new_cache_key = (server.clone(), new_nick.to_lowercase());
+                    if let Some(acc) = app.account_per_nick.remove(&old_cache_key) {
+                        app.account_per_nick.insert(new_cache_key.clone(), acc);
+                    }
+                    if let Some(uh) = app.userhost_per_nick.remove(&old_cache_key) {
+                        app.userhost_per_nick.insert(new_cache_key, uh);
+                    }
+                }
             }
             let current_key = app.current_server.as_ref().and_then(|s| {
                 app.current_channel.as_ref().map(|t| msg_key(s, t))
@@ -806,7 +845,9 @@ fn apply_irc_message(
             let key = (server.clone(), nick.to_lowercase());
             app.account_per_nick.insert(key, account);
         }
-        M::ChgHost { server: _server, nick, new_user, new_host } => {
+        M::ChgHost { server, nick, new_user, new_host } => {
+            // Update cached userhost so whois, user list, and ban masks stay current.
+            app.userhost_per_nick.insert((server, nick.to_lowercase()), format!("{}@{}", new_user, new_host));
             app.status_message = format!("{} changed host to {}@{}", nick, new_user, new_host);
         }
         M::Setname { server: _server, nick, realname } => {
@@ -842,8 +883,13 @@ fn apply_irc_message(
                     app.messages.remove(&k);
                 }
             }
-            // Clear reactions (msgids are orphaned when messages removed)
-            app.reactions.clear();
+            // Remove reactions whose msgid no longer appears in any message
+            // (avoids wiping reactions from other connected servers).
+            let valid_msgids: std::collections::HashSet<String> = app.messages.values()
+                .flatten()
+                .filter_map(|m| m.msgid.clone())
+                .collect();
+            app.reactions.retain(|k, _| valid_msgids.contains(k));
             app.unread_targets.retain(|k| !k.starts_with(&format!("{}/", server)));
             app.unread_mentions.retain(|k| !k.starts_with(&format!("{}/", server)));
             for k in app.channel_topics.keys().cloned().collect::<Vec<_>>() {
@@ -2099,15 +2145,9 @@ fn handle_key_action(
                                     vec![format!("+{}", batch_id), "draft/multiline".to_string(), target.clone()],
                                 ));
                                 let lines: Vec<&str> = formatted.split('\n').collect();
-                                let last_idx = lines.len().saturating_sub(1);
                                 for (i, line) in lines.iter().enumerate() {
                                     let mut tags = vec![Tag("batch".to_string(), Some(batch_id.clone()))];
-                                    if i < last_idx {
-                                        // Not the last line: mark as continued (no newline break after this line).
-                                        // Omitting draft/multiline-concat = a real newline between lines (desired).
-                                        // Adding it would merge lines — we don't want that here.
-                                        let _ = tags; // use empty tag below
-                                    }
+                                    // Only the first line carries +reply (if replying).
                                     if i == 0 {
                                         if let Some(ref rid) = reply_to {
                                             tags.push(Tag("+reply".to_string(), Some(rid.clone())));
@@ -2115,7 +2155,7 @@ fn handle_key_action(
                                     }
                                     for chunk in format::split_message_for_irc(line, format::MAX_MESSAGE_BYTES) {
                                         let msg = IrcProtoMessage::with_tags(
-                                            Some(vec![Tag("batch".to_string(), Some(batch_id.clone()))]),
+                                            Some(tags.clone()),
                                             None,
                                             "PRIVMSG",
                                             vec![target.as_str(), chunk.as_str()],
@@ -2884,8 +2924,10 @@ fn run_command(
         R::Nick(newnick) => {
             if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                 let _ = c.send(IrcCommand::NICK(newnick.clone()));
-                app.current_nickname = Some(newnick.clone());
-                app.status_message = format!("Changing nick to {}", newnick);
+                // Don't update current_nickname here — wait for the server to echo NICK back
+                // (handled in M::Line for MessageKind::Nick). If the server rejects it we'd
+                // display the wrong nick otherwise.
+                app.status_message = format!("Requesting nick change to {}...", newnick);
             } else {
                 app.status_message = "Not connected.".to_string();
             }
