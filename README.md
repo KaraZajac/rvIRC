@@ -43,6 +43,15 @@
 | **IRC: userhost-in-names** | User list shows ident@host when available |
 | **IRC: bot-mode** | Bot users shown with [bot] in user list and message headers |
 | **IRC: draft/channel-context** | DMs from bots with channel context appear in the channel buffer |
+| **IRC: setname** | `:setname <realname>` changes your real name; server broadcasts the change and rvIRC displays it in chat |
+| **IRC: extended-monitor** | Extended MONITOR support for richer friend presence tracking |
+| **IRC: UTF8ONLY** | Warns in the status bar when connected to a UTF-8-only server (ISUPPORT token) |
+| **IRC: WHOX** | Extended WHO queries on join fetch each user's account name; used for account-extban display |
+| **IRC: draft/read-marker** | MARKREAD sent when switching to a buffer; incoming MARKREAD from other clients syncs read state |
+| **IRC: draft/channel-rename** | RENAME command handler — renames the channel in all panes and moves history to the new name |
+| **IRC: draft/multiline** | Pasting multi-line text sends it as a `draft/multiline` BATCH instead of separate messages |
+| **IRC: draft/account-registration** | `:register <email> <password>` sends a REGISTER command; result shown via FAIL/NOTE standard-replies |
+| **IRC: account-extban** | `:bans` / `:banlist` shows a scrollable ban-list popup; `$a:account` extbans are formatted as `[account: name]` |
 
 ## Build & run
 
@@ -99,6 +108,9 @@ Type `:` to enter COMMAND mode, or `/` in the input bar (e.g. `/pass xyz`), then
 | `verify [nick]` | Display a 6-word verification code for the secure session (compare out-of-band) |
 | `verified [nick]` | Mark the peer as verified after comparing verification codes |
 | `sendfile [nick] [path]` | Send a file via magic wormhole; omit path to browse, omit nick to use current DM |
+| `setname <realname>` | Change your IRC real name (requires `setname` cap) |
+| `register <email> <password>` | Register a new account on the server (requires `draft/account-registration` cap) |
+| `bans` / `banlist [#channel]` | Fetch and display the ban list for the current or specified channel in a popup |
 
 ## Keybindings
 
@@ -170,6 +182,7 @@ Panels can be hidden independently with `:channel-panel hide`, `:messages-panel 
 - **Whois** — **Esc** or **Enter** or **q** to close.
 - **:credits** — **Esc** or **Enter** or **q** to close.
 - **:license** — **j/k** or arrows / Page Up/Down to scroll; **Esc** or **Enter** or **q** to close.
+- **:bans / :banlist** — **j/k** or arrows to scroll; **Esc**, **Enter**, or **q** to close. `$a:account` extbans shown as `[account: name]`.
 - **Secure session request** — **y** / **Enter** to accept, **n** / **Esc** to reject. Shows a TOFU warning in red if the peer's identity key has changed.
 - **File receive** — **y** / **Enter** to accept, **n** / **Esc** to reject.
 - **File browser** (receive: choose save dir; send: choose file) — **j/k** or arrows to navigate, **Enter** to open directory (or select file when sending), **Backspace** to go up, **s** to save here (receive mode), **Esc** or **q** to cancel.

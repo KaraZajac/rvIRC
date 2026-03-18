@@ -359,8 +359,26 @@ fn main() -> Result<(), String> {
             apply_irc_message(&mut app, msg, &irc_tx, &rt);
             if let Some(server) = connected_server {
                 if let Some((ref c, _)) = clients.get(server.as_str()) {
-                    for nick in app.friends_per_server.get(&server).into_iter().flatten() {
-                        let _ = c.send(IrcCommand::MONITOR("+".to_string(), Some(nick.clone())));
+                    if let Some(friends) = app.friends_per_server.get(&server) {
+                        // IRCv3 MONITOR: batch targets (comma-separated, ~400 chars per cmd to stay under 512)
+                        const MAX_TARGETS_LEN: usize = 400;
+                        let mut batch = String::new();
+                        for nick in friends {
+                            let add = if batch.is_empty() {
+                                nick.clone()
+                            } else {
+                                format!(",{}", nick)
+                            };
+                            if !batch.is_empty() && batch.len() + add.len() > MAX_TARGETS_LEN {
+                                let _ = c.send(IrcCommand::MONITOR("+".to_string(), Some(std::mem::take(&mut batch))));
+                                batch = nick.clone();
+                            } else {
+                                batch.push_str(&add);
+                            }
+                        }
+                        if !batch.is_empty() {
+                            let _ = c.send(IrcCommand::MONITOR("+".to_string(), Some(batch)));
+                        }
                     }
                 }
             }
@@ -472,7 +490,7 @@ fn main() -> Result<(), String> {
         let key_action = if let Ok(true) = event {
             crossterm::event::read()
                 .ok()
-                .and_then(|ev| handle_key(ev, app.mode, app.panel_focus, app.reply_select_mode, app.channel_panel_visible, app.messages_panel_visible, app.user_panel_visible, app.friends_panel_visible, app.user_action_menu, app.channel_list_popup_visible, app.channel_list_scroll_mode, app.search_popup_visible, app.search_scroll_mode, app.server_list_popup_visible, app.whois_popup_visible, app.credits_popup_visible, app.license_popup_visible, app.file_receive_popup_visible, app.file_browser_visible, app.secure_accept_popup_visible, app.highlight_popup_visible, app.away_popup_visible, app.user_list_filter_focused))
+                .and_then(|ev| handle_key(ev, app.mode, app.panel_focus, app.reply_select_mode, app.channel_panel_visible, app.messages_panel_visible, app.user_panel_visible, app.friends_panel_visible, app.user_action_menu, app.channel_list_popup_visible, app.channel_list_scroll_mode, app.search_popup_visible, app.search_scroll_mode, app.server_list_popup_visible, app.whois_popup_visible, app.ban_popup_visible, app.credits_popup_visible, app.license_popup_visible, app.file_receive_popup_visible, app.file_browser_visible, app.secure_accept_popup_visible, app.highlight_popup_visible, app.away_popup_visible, app.user_list_filter_focused))
         } else {
             None
         };
@@ -749,25 +767,38 @@ fn apply_irc_message(
             }
         }
         M::NickInUse { .. } | M::CtcpRequest { .. } | M::SendPrivmsg { .. } | M::SendPrivmsgOrEncrypt { .. } | M::Status(_) | M::ChatLog { .. } | M::ImageReady { .. } | M::AnimatedImageReady { .. } | M::TransferProgress { .. } | M::TransferComplete { .. } => {}
-        M::MonOnline { server: _server, nicks } => {
+        M::MonOnline { server, nicks } => {
+            let set = app.friends_online.entry(server).or_default();
             for n in nicks {
-                app.friends_online.insert(n);
+                set.insert(n);
             }
         }
-        M::MonOffline { server: _server, nicks } => {
-            for n in nicks {
-                app.friends_online.remove(&n);
-                app.friends_away.remove(&n);
+        M::MonOffline { server, nicks } => {
+            if let Some(set) = app.friends_online.get_mut(&server) {
+                for n in &nicks {
+                    set.remove(n);
+                }
+            }
+            if let Some(set) = app.friends_away.get_mut(&server) {
+                for n in &nicks {
+                    set.remove(n);
+                }
             }
             app.clamp_friends_index();
         }
-        M::FriendAway { server: _server, nick, away } => {
-            if app.is_friend(&nick) {
-                if let Some(existing) = app.friends_away.iter().find(|a| a.eq_ignore_ascii_case(&nick)).cloned() {
-                    app.friends_away.remove(&existing);
-                }
+        M::MonListFull { server, limit, targets } => {
+            app.status_message = format!(
+                "{}: Monitor list full (limit {}). Could not add: {}",
+                server, limit, targets
+            );
+        }
+        M::FriendAway { server, nick, away } => {
+            if app.is_friend_on_server(&server, &nick) {
+                let set = app.friends_away.entry(server).or_default();
                 if away {
-                    app.friends_away.insert(nick);
+                    set.insert(nick);
+                } else {
+                    set.remove(&nick);
                 }
             }
         }
@@ -779,7 +810,7 @@ fn apply_irc_message(
             app.status_message = format!("{} changed host to {}@{}", nick, new_user, new_host);
         }
         M::Setname { server: _server, nick, realname } => {
-            app.status_message = format!("{} is now known as {}", nick, realname);
+            app.status_message = format!("{} changed their real name to \"{}\"", nick, realname);
         }
         M::Connected { server } => {
             if !app.connected_servers.contains(&server) {
@@ -788,8 +819,8 @@ fn apply_irc_message(
             if app.current_server.is_none() {
                 app.current_server = Some(server.clone());
             }
-            app.friends_online.clear();
-            app.friends_away.clear();
+            app.friends_online.remove(&server);
+            app.friends_away.remove(&server);
             if let Some(ref path) = app.friends_path {
                 let loaded = friends::load_friends(path, Some(&server));
                 app.friends_per_server.insert(server.clone(), loaded);
@@ -846,11 +877,14 @@ fn apply_irc_message(
             app.whois_popup_visible = false;
             app.whois_nick.clear();
             app.whois_lines.clear();
+            app.ban_popup_visible = false;
+            app.ban_popup_channel.clear();
+            app.ban_popup_entries.clear();
             app.pending_auto_join_servers.remove(&server);
             app.auto_join_after_per_server.remove(&server);
             app.last_invite = None;
-            app.friends_online.clear();
-            app.friends_away.clear();
+            app.friends_online.remove(&server);
+            app.friends_away.remove(&server);
             app.acked_caps_per_server.remove(&server);
             app.requested_caps_per_server.remove(&server);
             app.away_message = None;
@@ -900,6 +934,82 @@ fn apply_irc_message(
                 is_bot_sender: false,
             };
             app.push_message(&server, "*server*", line);
+        }
+        M::WhoxResult { server, nick, user, host, account } => {
+            // Update userhost and account caches from WHOX response.
+            app.userhost_per_nick.insert((server.clone(), nick.to_lowercase()), format!("{}@{}", user, host));
+            if let Some(acc) = account {
+                app.account_per_nick.insert((server, nick.to_lowercase()), Some(acc));
+            }
+        }
+        M::IsupportUtf8Only { server } => {
+            app.utf8only_servers.insert(server.clone());
+            let line = MessageLine {
+                source: "***".to_string(),
+                text: "Warning: This server is UTF-8 only (UTF8ONLY). Non-UTF-8 messages will be rejected.".to_string(),
+                kind: MessageKind::Other,
+                image_id: None,
+                timestamp: None,
+                account: None,
+                msgid: None,
+                reply_to_msgid: None,
+                is_bot_sender: false,
+            };
+            app.push_message(&server, "*server*", line);
+        }
+        M::ReadMarker { server, target, timestamp: _ } => {
+            // Server-synced read marker: another client moved this target's read position.
+            // Mark unread state cleared so sidebar indicator clears.
+            app.mark_target_read(&server, &target);
+        }
+        M::ChannelRenamed { server, old, new, reason } => {
+            // Update channel in per-server list.
+            if let Some(chans) = app.channels_per_server.get_mut(&server) {
+                if let Some(pos) = chans.iter().position(|c| c.eq_ignore_ascii_case(&old)) {
+                    chans[pos] = new.clone();
+                }
+            }
+            // Move message history to new key.
+            let old_key = app::msg_key(&server, &old);
+            let new_key = app::msg_key(&server, &new);
+            if let Some(messages) = app.messages.remove(&old_key) {
+                app.messages.insert(new_key.clone(), messages);
+            }
+            if let Some(topic) = app.channel_topics.remove(&old_key) {
+                app.channel_topics.insert(new_key.clone(), topic);
+            }
+            if let Some(modes) = app.channel_modes.remove(&old_key) {
+                app.channel_modes.insert(new_key.clone(), modes);
+            }
+            if app.unread_targets.remove(&old_key) {
+                app.unread_targets.insert(new_key.clone());
+            }
+            if app.unread_mentions.remove(&old_key) {
+                app.unread_mentions.insert(new_key.clone());
+            }
+            // If we were viewing the old channel, switch to new name.
+            if app.current_server.as_deref() == Some(server.as_str())
+                && app.current_channel.as_ref().map_or(false, |c| c.eq_ignore_ascii_case(&old))
+            {
+                app.current_channel = Some(new.clone());
+                app.sync_channel_index_to_current();
+            }
+            app.clamp_channel_index();
+            let reason_str = reason.as_deref().map(|r| format!(" ({})", r)).unwrap_or_default();
+            app.push_chat_log(&server, &new, &format!("Channel renamed from {} to {}{}", old, new, reason_str));
+        }
+        M::BanList { server: _, channel, entries } => {
+            app.ban_popup_channel = channel;
+            app.ban_popup_entries = entries;
+            app.ban_popup_scroll = 0;
+            app.ban_popup_visible = true;
+        }
+        M::RegisterResult { server: _, success, message } => {
+            if success {
+                app.status_message = format!("Registration successful: {}", message);
+            } else {
+                app.status_message = format!("Registration failed: {}", message);
+            }
         }
     }
 }
@@ -1030,6 +1140,10 @@ fn handle_key_action(
         }
         MessageSelect => {
             if let Some((server, nick)) = app.messages_list().get(app.messages_index).cloned() {
+                // Send MARKREAD for the buffer we're leaving before switching.
+                if let (Some(prev_server), Some(prev_target)) = (app.current_server.clone(), app.current_channel.clone()) {
+                    send_markread(clients, app, &prev_server, &prev_target);
+                }
                 app.save_current_read_marker();
                 app.current_server = Some(server.clone());
                 app.current_channel = Some(nick.clone());
@@ -1085,6 +1199,9 @@ fn handle_key_action(
         }
         ChannelSelect => {
             if let Some((server, target)) = app.channels_list().get(app.channel_index).cloned() {
+                if let (Some(prev_server), Some(prev_target)) = (app.current_server.clone(), app.current_channel.clone()) {
+                    send_markread(clients, app, &prev_server, &prev_target);
+                }
                 app.save_current_read_marker();
                 app.current_server = Some(server.clone());
                 app.current_channel = Some(target.clone());
@@ -1388,6 +1505,18 @@ fn handle_key_action(
         CloseWhoisPopup => {
             app.whois_popup_visible = false;
         }
+        CloseBanPopup => {
+            app.ban_popup_visible = false;
+        }
+        BanPopupUp => {
+            app.ban_popup_scroll = app.ban_popup_scroll.saturating_sub(1);
+        }
+        BanPopupDown => {
+            let max = app.ban_popup_entries.len().saturating_sub(1);
+            if app.ban_popup_scroll < max {
+                app.ban_popup_scroll += 1;
+            }
+        }
         CloseCreditsPopup => {
             app.credits_popup_visible = false;
         }
@@ -1662,11 +1791,16 @@ fn handle_key_action(
         }
         Paste(s) => {
             if app.mode == Mode::Insert || app.mode == Mode::Command {
-                // Filter control chars, keep printable; replace newlines with space for single-line IRC.
+                // When draft/multiline is acked, preserve \n so pasted text can be sent as a
+                // multiline batch. Otherwise replace newlines with space (single-line IRC).
+                let multiline_acked = app.current_server.as_ref()
+                    .and_then(|sv| app.acked_caps_per_server.get(sv))
+                    .map_or(false, |s| s.contains("draft/multiline"));
                 let s: String = s
                     .chars()
-                    .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
-                    .filter(|c| !c.is_control() || *c == ' ')
+                    .map(|c| if c == '\r' { '\n' } else { c })
+                    .map(|c| if !multiline_acked && c == '\n' { ' ' } else { c })
+                    .filter(|c| !c.is_control() || *c == ' ' || *c == '\n')
                     .collect();
                 if s.is_empty() {
                     return Ok(false);
@@ -1904,22 +2038,65 @@ fn handle_key_action(
                                 push_self_message(app, &server, &target, formatted, reply_to.clone(), irc_tx, rt);
                             }
                         } else {
-                            let mut first = true;
-                            for chunk in format::split_message_for_irc(&formatted, format::MAX_MESSAGE_BYTES) {
-                                if first && reply_to.is_some() {
-                                    let tags = Some(vec![Tag("+reply".to_string(), reply_to.clone())]);
-                                    let msg = IrcProtoMessage::with_tags(
-                                        tags,
-                                        None,
-                                        "PRIVMSG",
-                                        vec![target.as_str(), chunk.as_str()],
-                                    )
-                                    .map_err(|e| e.to_string())?;
-                                    c.send(msg).map_err(|e| e.to_string())?;
-                                } else {
-                                    c.send_privmsg(&target, &chunk).map_err(|e| e.to_string())?;
+                            let multiline_acked = app.acked_caps_per_server.get(&server)
+                                .map_or(false, |s| s.contains("draft/multiline"));
+                            if multiline_acked && formatted.contains('\n') {
+                                // Send as a draft/multiline BATCH.
+                                let batch_id = format!("ml{:04x}", (std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .subsec_millis()) as u16);
+                                let _ = c.send(IrcCommand::Raw(
+                                    "BATCH".to_string(),
+                                    vec![format!("+{}", batch_id), "draft/multiline".to_string(), target.clone()],
+                                ));
+                                let lines: Vec<&str> = formatted.split('\n').collect();
+                                let last_idx = lines.len().saturating_sub(1);
+                                for (i, line) in lines.iter().enumerate() {
+                                    let mut tags = vec![Tag("batch".to_string(), Some(batch_id.clone()))];
+                                    if i < last_idx {
+                                        // Not the last line: mark as continued (no newline break after this line).
+                                        // Omitting draft/multiline-concat = a real newline between lines (desired).
+                                        // Adding it would merge lines — we don't want that here.
+                                        let _ = tags; // use empty tag below
+                                    }
+                                    if i == 0 {
+                                        if let Some(ref rid) = reply_to {
+                                            tags.push(Tag("+reply".to_string(), Some(rid.clone())));
+                                        }
+                                    }
+                                    for chunk in format::split_message_for_irc(line, format::MAX_MESSAGE_BYTES) {
+                                        let msg = IrcProtoMessage::with_tags(
+                                            Some(vec![Tag("batch".to_string(), Some(batch_id.clone()))]),
+                                            None,
+                                            "PRIVMSG",
+                                            vec![target.as_str(), chunk.as_str()],
+                                        ).map_err(|e| e.to_string())?;
+                                        c.send(msg).map_err(|e| e.to_string())?;
+                                    }
                                 }
-                                first = false;
+                                let _ = c.send(IrcCommand::Raw(
+                                    "BATCH".to_string(),
+                                    vec![format!("-{}", batch_id)],
+                                ));
+                            } else {
+                                let mut first = true;
+                                for chunk in format::split_message_for_irc(&formatted, format::MAX_MESSAGE_BYTES) {
+                                    if first && reply_to.is_some() {
+                                        let tags = Some(vec![Tag("+reply".to_string(), reply_to.clone())]);
+                                        let msg = IrcProtoMessage::with_tags(
+                                            tags,
+                                            None,
+                                            "PRIVMSG",
+                                            vec![target.as_str(), chunk.as_str()],
+                                        )
+                                        .map_err(|e| e.to_string())?;
+                                        c.send(msg).map_err(|e| e.to_string())?;
+                                    } else {
+                                        c.send_privmsg(&target, &chunk).map_err(|e| e.to_string())?;
+                                    }
+                                    first = false;
+                                }
                             }
                             if app.away_message.is_some() {
                                 let _ = c.send(IrcCommand::AWAY(None));
@@ -2559,8 +2736,8 @@ fn run_command(
                 app.whois_lines.clear();
                 app.pending_auto_join_servers.remove(&server);
                 app.auto_join_after_per_server.remove(&server);
-                app.friends_online.clear();
-                app.friends_away.clear();
+                app.friends_online.remove(&server);
+                app.friends_away.remove(&server);
                 app.away_message = None;
                 app.away_popup_visible = false;
                 app.status_message = "Disconnected. Type :connect <server> to reconnect.".to_string();
@@ -2756,6 +2933,9 @@ fn run_command(
             }
         }
         R::SwitchChannel(ch) => {
+            if let (Some(prev_server), Some(prev_target)) = (app.current_server.clone(), app.current_channel.clone()) {
+                send_markread(clients, app, &prev_server, &prev_target);
+            }
             app.save_current_read_marker();
             app.current_channel = Some(ch.clone());
             if !ch.starts_with('#') && !ch.starts_with('&') && ch != "*server*" {
@@ -2995,8 +3175,12 @@ fn run_command(
                 }
             }
             if removed {
-                app.friends_online.remove(nick);
-                app.friends_away.remove(nick);
+                for set in app.friends_online.values_mut() {
+                    set.retain(|n| !n.eq_ignore_ascii_case(nick));
+                }
+                for set in app.friends_away.values_mut() {
+                    set.retain(|n| !n.eq_ignore_ascii_case(nick));
+                }
                 app.clamp_friends_index();
                 app.status_message = format!("Removed {} from friends.", nick);
             } else {
@@ -3166,6 +3350,54 @@ fn run_command(
                 for chunk in format::split_message_for_irc(&text, format::MAX_MESSAGE_BYTES) {
                     c.send_privmsg(&target, &chunk).map_err(|e| e.to_string())?;
                 }
+            }
+        }
+        R::Setname(realname) => {
+            if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
+                let acked = app.current_server.as_ref()
+                    .and_then(|s| app.acked_caps_per_server.get(s))
+                    .map_or(false, |s| s.contains("setname"));
+                if acked {
+                    let _ = c.send(IrcCommand::Raw("SETNAME".to_string(), vec![realname.clone()]));
+                    app.status_message = format!("Changing real name to \"{}\"", realname);
+                } else {
+                    app.status_message = "Server does not support SETNAME (setname cap not acked).".to_string();
+                }
+            } else {
+                app.status_message = "Not connected.".to_string();
+            }
+        }
+        R::Register { email, password } => {
+            if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
+                let acked = app.current_server.as_ref()
+                    .and_then(|s| app.acked_caps_per_server.get(s))
+                    .map_or(false, |s| s.contains("draft/account-registration"));
+                if acked {
+                    // REGISTER * <email> <password>  (* = any account name, server picks)
+                    let _ = c.send(IrcCommand::Raw("REGISTER".to_string(), vec!["*".to_string(), email, password]));
+                    app.status_message = "Registering account...".to_string();
+                } else {
+                    app.status_message = "Server does not support account registration (draft/account-registration cap not acked).".to_string();
+                }
+            } else {
+                app.status_message = "Not connected.".to_string();
+            }
+        }
+        R::Banlist(channel_arg) => {
+            let target = channel_arg.or_else(|| {
+                app.current_channel.as_ref()
+                    .filter(|c| c.starts_with('#') || c.starts_with('&'))
+                    .cloned()
+            });
+            if let Some(ch) = target {
+                if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
+                    let _ = c.send(IrcCommand::Raw("MODE".to_string(), vec![ch.clone(), "+b".to_string()]));
+                    app.status_message = format!("Fetching ban list for {}...", ch);
+                } else {
+                    app.status_message = "Not connected.".to_string();
+                }
+            } else {
+                app.status_message = "Usage: :bans [#channel]".to_string();
             }
         }
         R::NoOp => {}
@@ -3342,6 +3574,11 @@ fn complete_input(app: &mut App) {
         "version", "credits", "license", "caps", "pass", "raw",
         "secure", "unsecure", "sendfile",
         "verify", "verified",
+        "setname", "register", "bans", "banlist",
+        "whois", "more", "history", "highlight", "ignore", "unignore",
+        "add-friend", "remove-friend", "friends",
+        "notifications", "mute", "unmute",
+        "reply", "react", "redact",
     ];
     let input = &app.input;
     let cursor = app.input_cursor.min(input.len());
@@ -3383,12 +3620,42 @@ fn common_prefix(mut it: impl Iterator<Item = impl AsRef<str>>) -> String {
     prefix
 }
 
+/// Send a MARKREAD message to the server to sync the read position for `target`.
+/// Only sent when draft/read-marker cap is acked for this server.
+fn send_markread(
+    clients: &HashMap<String, (Client, tokio::task::JoinHandle<()>)>,
+    app: &App,
+    server: &str,
+    target: &str,
+) {
+    if target.is_empty() || target == "*server*" { return; }
+    let acked = app.acked_caps_per_server.get(server)
+        .map_or(false, |s| s.contains("draft/read-marker"));
+    if !acked { return; }
+    if let Some((ref c, _)) = clients.get(server) {
+        let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+        let _ = c.send(IrcCommand::Raw(
+            "MARKREAD".to_string(),
+            vec![target.to_string(), format!("timestamp={}", ts)],
+        ));
+    }
+}
+
 /// Request NAMES for the current channel so the user list is populated.
-fn request_channel_names(clients: &mut HashMap<String, (Client, tokio::task::JoinHandle<()>)>, app: &App) {
-    if let (Some(ref server), Some(ref ch)) = (app.current_server.as_ref(), app.current_channel.as_ref()) {
+/// Also sends a WHOX request when the cap is available to populate account/userhost caches.
+fn request_channel_names(clients: &mut HashMap<String, (Client, tokio::task::JoinHandle<()>)>, app: &mut App) {
+    if let (Some(ref server), Some(ref ch)) = (app.current_server.clone(), app.current_channel.clone()) {
         if ch.starts_with('#') || ch.starts_with('&') {
             if let Some((ref c, _)) = clients.get(server.as_str()) {
                 let _ = c.send(IrcCommand::NAMES(Some(ch.to_string()), None));
+                // WHOX: send extended WHO to populate account and userhost info.
+                // Use a rotating token (1–999) for correlation; server responds with RPL_WHOSPCRPL (354).
+                let token = app.whox_token;
+                app.whox_token = if app.whox_token >= 999 { 1 } else { app.whox_token + 1 };
+                let _ = c.send(IrcCommand::Raw(
+                    "WHO".to_string(),
+                    vec![ch.to_string(), format!("%tuhnaf,{}", token)],
+                ));
             }
         }
     }

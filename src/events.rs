@@ -19,6 +19,7 @@ pub fn handle_key(
     search_scroll_mode: bool,
     server_list_popup_visible: bool,
     whois_popup_visible: bool,
+    ban_popup_visible: bool,
     credits_popup_visible: bool,
     license_popup_visible: bool,
     file_receive_popup_visible: bool,
@@ -56,6 +57,9 @@ pub fn handle_key(
     }
     if license_popup_visible {
         return Some(handle_license_popup(key));
+    }
+    if ban_popup_visible {
+        return Some(handle_ban_popup(key));
     }
     if whois_popup_visible {
         return Some(handle_whois_popup(key));
@@ -145,6 +149,9 @@ pub enum KeyAction {
     SearchPopupFocusList,
     SearchPopupFocusFilter,
     CloseWhoisPopup,
+    CloseBanPopup,
+    BanPopupUp,
+    BanPopupDown,
     CloseCreditsPopup,
     CloseLicensePopup,
     LicenseScrollUp,
@@ -392,6 +399,15 @@ fn handle_user_action_menu(key: KeyEvent) -> KeyAction {
 fn handle_whois_popup(key: KeyEvent) -> KeyAction {
     match key.code {
         KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => KeyAction::CloseWhoisPopup,
+        _ => KeyAction::NoOp,
+    }
+}
+
+fn handle_ban_popup(key: KeyEvent) -> KeyAction {
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => KeyAction::CloseBanPopup,
+        KeyCode::Up | KeyCode::Char('k') => KeyAction::BanPopupUp,
+        KeyCode::Down | KeyCode::Char('j') => KeyAction::BanPopupDown,
         _ => KeyAction::NoOp,
     }
 }

@@ -126,10 +126,10 @@ pub struct App {
     pub user_action_index: usize,
     /// Friends list per server (MONITOR targets). Persisted in friends.toml.
     pub friends_per_server: HashMap<String, Vec<String>>,
-    /// Friends currently online (from RPL_MONONLINE/731).
-    pub friends_online: HashSet<String>,
-    /// Friends currently away (from away-notify AWAY; only for friends in friends_list).
-    pub friends_away: HashSet<String>,
+    /// Friends currently online per server (from RPL_MONONLINE 730).
+    pub friends_online: HashMap<String, HashSet<String>>,
+    /// Friends currently away per server (from away-notify AWAY).
+    pub friends_away: HashMap<String, HashSet<String>>,
     /// Selection index within friends list.
     pub friends_index: usize,
     /// Path to friends.toml for saving.
@@ -316,6 +316,18 @@ pub struct App {
     pub typing_status: HashMap<(String, String, String), (String, Instant)>,
     /// When we last sent a typing indicator per target (for throttle: max once per 3s).
     pub last_typing_sent: HashMap<String, Instant>,
+
+    /// Servers that advertised UTF8ONLY in their ISUPPORT (005) burst.
+    pub utf8only_servers: HashSet<String>,
+    /// WHOX query token counter (1–999, wraps). Used to correlate WHO requests with responses.
+    pub whox_token: u16,
+
+    /// Ban list popup state.
+    pub ban_popup_visible: bool,
+    pub ban_popup_channel: String,
+    pub ban_popup_entries: Vec<String>,
+    /// Scroll offset for ban list popup.
+    pub ban_popup_scroll: usize,
 }
 
 /// An inline image: either a static frame or an animated GIF with pre-encoded frames.
@@ -384,8 +396,8 @@ impl App {
             user_action_menu: false,
             user_action_index: 0,
             friends_per_server: HashMap::new(),
-            friends_online: HashSet::new(),
-            friends_away: HashSet::new(),
+            friends_online: HashMap::new(),
+            friends_away: HashMap::new(),
             friends_index: 0,
             friends_path: None,
             panel_focus: PanelFocus::Main,
@@ -492,6 +504,12 @@ impl App {
             read_markers_path: None,
             typing_status: HashMap::new(),
             last_typing_sent: HashMap::new(),
+            utf8only_servers: HashSet::new(),
+            whox_token: 1,
+            ban_popup_visible: false,
+            ban_popup_channel: String::new(),
+            ban_popup_entries: Vec::new(),
+            ban_popup_scroll: 0,
         }
     }
 
@@ -1044,7 +1062,7 @@ impl App {
             .unwrap_or(false);
         if hide {
             all.into_iter()
-                .filter(|n| self.friends_online.iter().any(|o| o.eq_ignore_ascii_case(n)))
+                .filter(|n| self.is_friend_online_anywhere(n))
                 .collect()
         } else {
             all
@@ -1052,17 +1070,47 @@ impl App {
     }
 
     /// True if nick is a friend on any server.
+    #[allow(dead_code)]
     pub fn is_friend(&self, nick: &str) -> bool {
         self.friends_per_server
             .values()
             .any(|v| v.iter().any(|n| n.eq_ignore_ascii_case(nick)))
     }
 
-    /// Friend status for display: (online, away).
+    /// Friend status for display: (online, away). Checks all servers where nick is a friend.
     pub fn friend_status(&self, nick: &str) -> (bool, bool) {
-        let online = self.friends_online.iter().any(|o| o.eq_ignore_ascii_case(nick));
-        let away = self.friends_away.iter().any(|a| a.eq_ignore_ascii_case(nick));
+        let online = self.is_friend_online_anywhere(nick);
+        let away = self.is_friend_away_anywhere(nick);
         (online, away)
+    }
+
+    /// True if nick is a friend on the given server.
+    pub fn is_friend_on_server(&self, server: &str, nick: &str) -> bool {
+        self.friends_per_server
+            .get(server)
+            .map_or(false, |v| v.iter().any(|n| n.eq_ignore_ascii_case(nick)))
+    }
+
+    /// True if nick is online on any server where they're a friend.
+    fn is_friend_online_anywhere(&self, nick: &str) -> bool {
+        self.friends_per_server.iter().any(|(server, friends)| {
+            friends.iter().any(|f| f.eq_ignore_ascii_case(nick))
+                && self
+                    .friends_online
+                    .get(server)
+                    .map_or(false, |o| o.iter().any(|x| x.eq_ignore_ascii_case(nick)))
+        })
+    }
+
+    /// True if nick is away on any server where they're a friend.
+    fn is_friend_away_anywhere(&self, nick: &str) -> bool {
+        self.friends_per_server.iter().any(|(server, friends)| {
+            friends.iter().any(|f| f.eq_ignore_ascii_case(nick))
+                && self
+                    .friends_away
+                    .get(server)
+                    .map_or(false, |a| a.iter().any(|x| x.eq_ignore_ascii_case(nick)))
+        })
     }
 
     /// Set channel_index or messages_index to match current_server+current_channel.
