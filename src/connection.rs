@@ -107,6 +107,10 @@ pub enum IrcMessage {
     },
     /// REDACT: message was redacted, remove or replace in buffer.
     MessageRedacted { server: String, target: String, msgid: String },
+    /// draft/message-edit: a message was edited (new_text is the replacement).
+    MessageEdited { server: String, target: String, msgid: String, new_text: String },
+    /// draft/message-delete: a message was deleted.
+    MessageDeleted { server: String, target: String, msgid: String },
     /// draft/react: nick reacted to msgid with emoji (or unreacted).
     Reaction {
         server: String,
@@ -249,6 +253,9 @@ pub fn connect(
             Capability::Custom("draft/account-registration"),
             Capability::Custom("draft/extended-isupport"),
             Capability::Custom("draft/metadata"),
+            Capability::Custom("draft/message-edit"),
+            Capability::Custom("draft/message-delete"),
+            Capability::Custom("draft/channel-rename"),
         ];
         if sasl_mechanism.is_some() {
             caps.push(Capability::Sasl);
@@ -730,6 +737,25 @@ pub async fn run_stream(
                         // args[2] = visibility; args[3] = value (if present)
                         let value = args.get(3).map(|v| v.clone());
                         let _ = tx.send(IrcMessage::MetadataValue { server: server.clone(), target, key, value });
+                    } else if cmd.eq_ignore_ascii_case("EDIT") && !args.is_empty() {
+                        // draft/message-edit: @draft/target-msgid=<id>;draft/edit-text=<text> EDIT <target>
+                        let target = args[0].clone();
+                        if let Some(tags) = msg.tags.as_ref() {
+                            let msgid = tags.iter().find(|t| t.0 == "draft/target-msgid").and_then(|t| t.1.clone());
+                            let new_text = tags.iter().find(|t| t.0 == "draft/edit-text").and_then(|t| t.1.clone());
+                            if let (Some(msgid), Some(new_text)) = (msgid, new_text) {
+                                let _ = tx.send(IrcMessage::MessageEdited { server: server.clone(), target, msgid, new_text });
+                            }
+                        }
+                    } else if cmd.eq_ignore_ascii_case("DELETE") && !args.is_empty() {
+                        // draft/message-delete: @draft/target-msgid=<id> DELETE <target>
+                        let target = args[0].clone();
+                        if let Some(tags) = msg.tags.as_ref() {
+                            let msgid = tags.iter().find(|t| t.0 == "draft/target-msgid").and_then(|t| t.1.clone());
+                            if let Some(msgid) = msgid {
+                                let _ = tx.send(IrcMessage::MessageDeleted { server: server.clone(), target, msgid });
+                            }
+                        }
                     }
                 }
 
@@ -1166,6 +1192,8 @@ pub async fn run_stream(
                     || matches!(&msg.command, C::Raw(ref cmd, _) if cmd.eq_ignore_ascii_case("MARKREAD"))
                     || matches!(&msg.command, C::Raw(ref cmd, _) if cmd.eq_ignore_ascii_case("RENAME"))
                     || matches!(&msg.command, C::Raw(ref cmd, _) if cmd.eq_ignore_ascii_case("METADATA"))
+                    || matches!(&msg.command, C::Raw(ref cmd, _) if cmd.eq_ignore_ascii_case("EDIT"))
+                    || matches!(&msg.command, C::Raw(ref cmd, _) if cmd.eq_ignore_ascii_case("DELETE"))
                     || matches!(&msg.command, C::Raw(ref cmd, _) if matches!(cmd.as_str(), "FAIL" | "WARN" | "NOTE"));
                 if !should_skip_line {
                     if let Some((target, line)) = message_line(&msg) {

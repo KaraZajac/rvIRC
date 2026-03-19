@@ -953,6 +953,24 @@ fn apply_irc_message(
             }
             app.reactions.remove(&msgid);
         }
+        M::MessageEdited { server, target, msgid, new_text } => {
+            let key = app::msg_key(&server, &target);
+            if let Some(buf) = app.messages.get_mut(&key) {
+                if let Some(m) = buf.iter_mut().find(|l| l.msgid.as_deref() == Some(msgid.as_str())) {
+                    m.text = format!("{} (edited)", new_text);
+                }
+            }
+        }
+        M::MessageDeleted { server, target, msgid } => {
+            let key = app::msg_key(&server, &target);
+            if let Some(buf) = app.messages.get_mut(&key) {
+                if let Some(m) = buf.iter_mut().find(|l| l.msgid.as_deref() == Some(msgid.as_str())) {
+                    m.text = "[Message deleted]".to_string();
+                    m.kind = MessageKind::Other;
+                }
+            }
+            app.reactions.remove(&msgid);
+        }
         M::Reaction { server: _server, target: _target, msgid, nick, emoji, unreact } => {
             let list = app.reactions.entry(msgid.clone()).or_default();
             if unreact {
@@ -3101,6 +3119,71 @@ fn run_command(
                 app.status_message = "Select a message with r first, or :redact <msgid>.".to_string();
             }
         }
+        R::Edit { msgid: cmd_msgid, new_text } => {
+            let our_nick = app.current_nickname.clone().unwrap_or_default();
+            let msgid = cmd_msgid.or_else(|| app.reply_to_msgid.clone()).or_else(|| {
+                app.current_messages()
+                    .iter()
+                    .rev()
+                    .find(|m| m.msgid.is_some() && m.source.eq_ignore_ascii_case(&our_nick))
+                    .and_then(|m| m.msgid.clone())
+            });
+            if let (Some(msgid), Some(server), Some((c, _))) = (
+                msgid,
+                app.current_server.as_ref(),
+                app.current_server.as_ref().and_then(|s| clients.get(s.as_str())),
+            ) {
+                let target = app.current_channel.as_deref().unwrap_or("*server*");
+                if target == "*server*" {
+                    app.status_message = "Cannot edit in server buffer.".to_string();
+                } else if !app.acked_caps_per_server.get(server).map_or(false, |s| s.contains("draft/message-edit")) {
+                    app.status_message = "Server does not support message editing (draft/message-edit).".to_string();
+                } else {
+                    let tags = vec![
+                        Tag("draft/target-msgid".to_string(), Some(msgid)),
+                        Tag("draft/edit-text".to_string(), Some(new_text)),
+                    ];
+                    if let Ok(msg) = IrcProtoMessage::with_tags(Some(tags), None, "EDIT", vec![target]) {
+                        if let Err(e) = c.send(msg) {
+                            app.status_message = format!("Edit failed: {}", e);
+                        }
+                    }
+                }
+            } else {
+                app.status_message = "No sent message to edit (select with r first, or :edit msgid=<id> <text>).".to_string();
+            }
+        }
+        R::Delete { msgid: cmd_msgid } => {
+            let our_nick = app.current_nickname.clone().unwrap_or_default();
+            let msgid = cmd_msgid.or_else(|| app.reply_to_msgid.clone()).or_else(|| {
+                app.current_messages()
+                    .iter()
+                    .rev()
+                    .find(|m| m.msgid.is_some() && m.source.eq_ignore_ascii_case(&our_nick))
+                    .and_then(|m| m.msgid.clone())
+            });
+            if let (Some(msgid), Some(server), Some((c, _))) = (
+                msgid,
+                app.current_server.as_ref(),
+                app.current_server.as_ref().and_then(|s| clients.get(s.as_str())),
+            ) {
+                let target = app.current_channel.as_deref().unwrap_or("*server*");
+                if target == "*server*" {
+                    app.status_message = "Cannot delete in server buffer.".to_string();
+                } else if !app.acked_caps_per_server.get(server).map_or(false, |s| s.contains("draft/message-delete")) {
+                    app.status_message = "Server does not support message deletion (draft/message-delete).".to_string();
+                } else {
+                    let tags = vec![Tag("draft/target-msgid".to_string(), Some(msgid))];
+                    if let Ok(msg) = IrcProtoMessage::with_tags(Some(tags), None, "DELETE", vec![target]) {
+                        if let Err(e) = c.send(msg) {
+                            app.status_message = format!("Delete failed: {}", e);
+                        }
+                    }
+                }
+            } else {
+                app.status_message = "No sent message to delete (select with r first, or :delete <msgid>).".to_string();
+            }
+        }
         R::React(emoji) => {
             let msgid = app.reply_to_msgid.clone().or_else(|| {
                 let target_key = app::msg_key(
@@ -3721,7 +3804,7 @@ fn complete_input(app: &mut App) {
         "whois", "more", "history", "highlight", "ignore", "unignore",
         "add-friend", "remove-friend", "friends",
         "notifications", "mute", "unmute",
-        "reply", "react", "redact",
+        "reply", "react", "redact", "edit", "delete",
     ];
     let input = &app.input;
     let cursor = app.input_cursor.min(input.len());

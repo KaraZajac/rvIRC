@@ -78,6 +78,10 @@ pub enum CommandResult {
     /// draft/metadata: GET/SET/CLEAR/LIST metadata for a target.
     /// target=None means own nick; subcommand is "get"|"set"|"list"|"clear".
     Metadata { target: Option<String>, subcommand: String, key: Option<String>, value: Option<String> },
+    /// draft/message-edit: edit a sent message. msgid=None edits last sent message.
+    Edit { msgid: Option<String>, new_text: String },
+    /// draft/message-delete: delete a sent message. msgid=None deletes last sent message.
+    Delete { msgid: Option<String> },
     NoOp,
     Unknown(String),
 }
@@ -464,6 +468,38 @@ pub fn parse(line: &str) -> CommandResult {
                     CommandResult::StatusMessage("Usage: :metadata [target] list|get|set|clear [key] [value]".to_string())
                 }
             }
+        }
+        "edit" => {
+            // :edit <new text>
+            // :edit msgid=<msgid> <new text>
+            if rest.is_empty() {
+                CommandResult::StatusMessage("Usage: :edit <new text> or :edit msgid=<msgid> <new text>".to_string())
+            } else {
+                let mut parts = rest.splitn(2, char::is_whitespace);
+                let first = parts.next().unwrap_or("");
+                if first.starts_with("msgid=") {
+                    let msgid = first.trim_start_matches("msgid=").to_string();
+                    let new_text = parts.next().unwrap_or("").trim().to_string();
+                    if new_text.is_empty() {
+                        CommandResult::StatusMessage("Usage: :edit msgid=<msgid> <new text>".to_string())
+                    } else {
+                        CommandResult::Edit { msgid: Some(msgid), new_text }
+                    }
+                } else {
+                    CommandResult::Edit { msgid: None, new_text: rest.to_string() }
+                }
+            }
+        }
+        "delete" => {
+            let first = rest.split_whitespace().next().unwrap_or("");
+            let msgid = if first.is_empty() {
+                None
+            } else if first.starts_with("msgid=") {
+                Some(first.trim_start_matches("msgid=").to_string())
+            } else {
+                Some(first.to_string())
+            };
+            CommandResult::Delete { msgid }
         }
         _ => CommandResult::Unknown(format!("Unknown command: {}", cmd)),
     }
