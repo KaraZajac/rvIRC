@@ -515,9 +515,12 @@ fn main() -> Result<(), String> {
         }
     }
 
-    // Clean disconnect so the server and other users see a proper QUIT (not just connection closed)
-    for (_, (c, h)) in std::mem::take(&mut clients) {
+    // Clean disconnect: send QUIT to all servers, wait for TLS close_notify to flush, then abort.
+    for (_, (c, _)) in &clients {
         let _ = c.send_quit("Leaving");
+    }
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    for (_, (_, h)) in std::mem::take(&mut clients) {
         h.abort();
     }
     std::thread::sleep(std::time::Duration::from_millis(250));
@@ -2857,11 +2860,15 @@ fn run_command(
         R::Quit(msg) => {
             app.clear_reconnect();
             let quit_msg = msg.as_deref().unwrap_or("Leaving");
-            for (_, (c, h)) in std::mem::take(clients) {
+            let taken = std::mem::take(clients);
+            // Send QUIT to all servers before aborting tasks so TLS close_notify has time to flush.
+            for (_, (c, _)) in &taken {
                 let _ = c.send_quit(quit_msg);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            for (_, (_, h)) in taken {
                 h.abort();
             }
-            std::thread::sleep(std::time::Duration::from_millis(250));
             app.current_server = None;
             app.current_channel = None;
             app.connected_servers.clear();
