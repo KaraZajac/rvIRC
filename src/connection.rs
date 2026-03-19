@@ -247,6 +247,7 @@ pub fn connect(
             Capability::Custom("draft/pre-away"),
             Capability::Custom("standard-replies"),
             Capability::Custom("setname"),
+            Capability::Custom("monitor"),
             Capability::Custom("extended-monitor"),
             Capability::Custom("draft/multiline"),
             Capability::Custom("draft/read-marker"),
