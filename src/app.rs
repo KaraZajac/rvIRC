@@ -334,6 +334,17 @@ pub struct App {
     pub ban_popup_entries: Vec<String>,
     /// Scroll offset for ban list popup.
     pub ban_popup_scroll: usize,
+
+    /// Edit select mode: e pressed, waiting for 1-9 or 0 to pick which message to edit.
+    pub edit_select_mode: bool,
+    /// Edit popup: visible when a message is selected for editing.
+    pub edit_popup_visible: bool,
+    /// msgid of the message being edited.
+    pub edit_popup_msgid: String,
+    /// Current text in the edit popup input field.
+    pub edit_popup_input: String,
+    /// Cursor position (byte offset) in edit_popup_input.
+    pub edit_popup_cursor: usize,
 }
 
 /// An inline image: either a static frame or an animated GIF with pre-encoded frames.
@@ -519,6 +530,11 @@ impl App {
             ban_popup_channel: String::new(),
             ban_popup_entries: Vec::new(),
             ban_popup_scroll: 0,
+            edit_select_mode: false,
+            edit_popup_visible: false,
+            edit_popup_msgid: String::new(),
+            edit_popup_input: String::new(),
+            edit_popup_cursor: 0,
         }
     }
 
@@ -1140,6 +1156,37 @@ impl App {
     /// Selected friend from the friends pane (from visible list).
     pub fn selected_friend(&self) -> Option<String> {
         self.visible_friends().get(self.friends_index).cloned()
+    }
+
+    /// Messages editable by us: our own messages with a msgid, in chronological order.
+    /// Returns (msgid, text) pairs.
+    pub fn editable_msgids(&self) -> Vec<(String, String)> {
+        let our_nick = self.current_nickname.as_deref().unwrap_or("");
+        let target_key = msg_key(
+            self.current_server.as_deref().unwrap_or(""),
+            self.current_channel.as_deref().unwrap_or("*server*"),
+        );
+        self.current_messages()
+            .iter()
+            .filter(|m| {
+                m.msgid.is_some()
+                    && m.source.eq_ignore_ascii_case(our_nick)
+                    && !self.is_muted(&target_key, &m.source)
+            })
+            .filter_map(|m| m.msgid.as_ref().map(|id| (id.clone(), m.text.clone())))
+            .collect()
+    }
+
+    /// msgid -> display number (1–9, 10 for "0") for edit-select mode. Only last 10 editable.
+    pub fn edit_select_numbers(&self) -> std::collections::HashMap<String, u8> {
+        let ids = self.editable_msgids();
+        let len = ids.len();
+        let mut map = std::collections::HashMap::new();
+        for (i, (msgid, _)) in ids.iter().enumerate().rev().take(10) {
+            let num = (len - i) as u8;
+            map.insert(msgid.clone(), num);
+        }
+        map
     }
 }
 

@@ -8,6 +8,8 @@ pub fn handle_key(
     mode: Mode,
     panel_focus: PanelFocus,
     reply_select_mode: bool,
+    edit_select_mode: bool,
+    edit_popup_visible: bool,
     channel_panel_visible: bool,
     messages_panel_visible: bool,
     user_panel_visible: bool,
@@ -39,6 +41,12 @@ pub fn handle_key(
 
     if reply_select_mode {
         return Some(handle_reply_select(key));
+    }
+    if edit_select_mode {
+        return Some(handle_edit_select(key));
+    }
+    if edit_popup_visible {
+        return Some(handle_edit_popup(key));
     }
     if away_popup_visible {
         return Some(KeyAction::DismissAwayPopup);
@@ -210,6 +218,30 @@ pub enum KeyAction {
     ReplySelectByNumber(u8),
     /// Reply-select mode: cancel without replying.
     ReplySelectCancel,
+    /// Enter edit-select mode (press e).
+    EditMode,
+    /// Edit-select mode: pick message by number.
+    EditSelectByNumber(u8),
+    /// Edit-select mode: cancel.
+    EditSelectCancel,
+    /// Edit popup: type a character.
+    EditPopupChar(char),
+    /// Edit popup: backspace.
+    EditPopupBackspace,
+    /// Edit popup: forward delete.
+    EditPopupDelete,
+    /// Edit popup: move cursor left.
+    EditPopupCursorLeft,
+    /// Edit popup: move cursor right.
+    EditPopupCursorRight,
+    /// Edit popup: cursor to start.
+    EditPopupCursorHome,
+    /// Edit popup: cursor to end.
+    EditPopupCursorEnd,
+    /// Edit popup: send the edited message.
+    EditPopupSend,
+    /// Edit popup: close without sending.
+    EditPopupClose,
 }
 
 fn handle_reply_select(key: KeyEvent) -> KeyAction {
@@ -243,6 +275,7 @@ fn handle_normal(key: KeyEvent, panel_focus: PanelFocus) -> Option<KeyAction> {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(KeyAction::QuitApp),
         (KeyCode::Char('i'), KeyModifiers::NONE) => Some(KeyAction::SwitchMode(Mode::Insert)),
         (KeyCode::Char('r'), KeyModifiers::NONE) => Some(KeyAction::Reply),
+        (KeyCode::Char('e'), KeyModifiers::NONE) => Some(KeyAction::EditMode),
         (KeyCode::Char(':'), KeyModifiers::NONE) => Some(KeyAction::SwitchMode(Mode::Command)),
         (KeyCode::Char('c'), KeyModifiers::NONE) => Some(KeyAction::FocusChannels),
         (KeyCode::Char('m'), KeyModifiers::NONE) => Some(KeyAction::FocusMessages),
@@ -521,5 +554,38 @@ fn handle_search_popup(key: KeyEvent, scroll_mode: bool) -> KeyAction {
             (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => KeyAction::SearchPopupFilterChar(c),
             _ => KeyAction::NoOp,
         }
+    }
+}
+
+fn handle_edit_select(key: KeyEvent) -> KeyAction {
+    match key.code {
+        KeyCode::Esc => KeyAction::EditSelectCancel,
+        KeyCode::Char('1') => KeyAction::EditSelectByNumber(1),
+        KeyCode::Char('2') => KeyAction::EditSelectByNumber(2),
+        KeyCode::Char('3') => KeyAction::EditSelectByNumber(3),
+        KeyCode::Char('4') => KeyAction::EditSelectByNumber(4),
+        KeyCode::Char('5') => KeyAction::EditSelectByNumber(5),
+        KeyCode::Char('6') => KeyAction::EditSelectByNumber(6),
+        KeyCode::Char('7') => KeyAction::EditSelectByNumber(7),
+        KeyCode::Char('8') => KeyAction::EditSelectByNumber(8),
+        KeyCode::Char('9') => KeyAction::EditSelectByNumber(9),
+        KeyCode::Char('0') => KeyAction::EditSelectByNumber(10),
+        _ => KeyAction::NoOp,
+    }
+}
+
+fn handle_edit_popup(key: KeyEvent) -> KeyAction {
+    use crossterm::event::KeyModifiers;
+    match (key.code, key.modifiers) {
+        (KeyCode::Esc, _) => KeyAction::EditPopupClose,
+        (KeyCode::Enter, _) => KeyAction::EditPopupSend,
+        (KeyCode::Backspace, _) => KeyAction::EditPopupBackspace,
+        (KeyCode::Delete, _) => KeyAction::EditPopupDelete,
+        (KeyCode::Left, _) => KeyAction::EditPopupCursorLeft,
+        (KeyCode::Right, _) => KeyAction::EditPopupCursorRight,
+        (KeyCode::Home, _) => KeyAction::EditPopupCursorHome,
+        (KeyCode::End, _) => KeyAction::EditPopupCursorEnd,
+        (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => KeyAction::EditPopupChar(c),
+        _ => KeyAction::NoOp,
     }
 }
