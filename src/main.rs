@@ -3552,14 +3552,15 @@ fn run_command(
                 app.status_message = "Not connected.".to_string();
             }
         }
-        R::Register { email, password } => {
+        R::Register { account, email, password } => {
             if let Some((ref c, _)) = app.current_server.as_ref().and_then(|s| clients.get(s)) {
                 let acked = app.current_server.as_ref()
                     .and_then(|s| app.acked_caps_per_server.get(s))
                     .map_or(false, |s| s.contains("draft/account-registration"));
                 if acked {
-                    // REGISTER * <email> <password>  (* = any account name, server picks)
-                    let _ = c.send(IrcCommand::Raw("REGISTER".to_string(), vec!["*".to_string(), email, password]));
+                    // REGISTER <account> <email> <password>
+                    // account = * means use current nick; email = * means no email required
+                    let _ = c.send(IrcCommand::Raw("REGISTER".to_string(), vec![account, email, password]));
                     app.status_message = "Registering account...".to_string();
                 } else {
                     app.status_message = "Server does not support account registration (draft/account-registration cap not acked).".to_string();

@@ -71,8 +71,9 @@ pub enum CommandResult {
     Raw(String),
     /// Change own realname via IRCv3 SETNAME command.
     Setname(String),
-    /// Register an account via draft/account-registration (REGISTER * <email> <password>).
-    Register { email: String, password: String },
+    /// Register an account via draft/account-registration (REGISTER <account> <email> <password>).
+    /// account = "*" means use current nick. email = "*" means no email required.
+    Register { account: String, email: String, password: String },
     /// Request ban list for a channel (:bans or :banlist [#channel]).
     Banlist(Option<String>),
     /// draft/metadata: GET/SET/CLEAR/LIST metadata for a target.
@@ -422,13 +423,21 @@ pub fn parse(line: &str) -> CommandResult {
             }
         }
         "register" => {
-            let mut parts = rest.splitn(2, char::is_whitespace);
-            let email = parts.next().unwrap_or("").to_string();
-            let password = parts.next().unwrap_or("").trim().to_string();
-            if email.is_empty() || password.is_empty() {
-                CommandResult::StatusMessage("Usage: :register <email> <password>".to_string())
+            // Spec: REGISTER <account> <email> <password>
+            // :register <account> <email> <password>  — full form
+            // :register <email> <password>            — shorthand: account defaults to *
+            let mut parts = rest.splitn(3, char::is_whitespace);
+            let a = parts.next().unwrap_or("").trim().to_string();
+            let b = parts.next().unwrap_or("").trim().to_string();
+            let c = parts.next().unwrap_or("").trim().to_string();
+            if a.is_empty() || b.is_empty() {
+                CommandResult::StatusMessage("Usage: :register <account> <email> <password>  (use * for account or email to skip)".to_string())
+            } else if c.is_empty() {
+                // 2-arg form: treat as <email> <password>, account = *
+                CommandResult::Register { account: "*".to_string(), email: a, password: b }
             } else {
-                CommandResult::Register { email, password }
+                // 3-arg form: <account> <email> <password>
+                CommandResult::Register { account: a, email: b, password: c }
             }
         }
         "banlist" | "bans" => {
