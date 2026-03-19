@@ -490,7 +490,7 @@ fn main() -> Result<(), String> {
         let key_action = if let Ok(true) = event {
             crossterm::event::read()
                 .ok()
-                .and_then(|ev| handle_key(ev, app.mode, app.panel_focus, app.reply_select_mode, app.channel_panel_visible, app.messages_panel_visible, app.user_panel_visible, app.friends_panel_visible, app.user_action_menu, app.channel_list_popup_visible, app.channel_list_scroll_mode, app.search_popup_visible, app.search_scroll_mode, app.server_list_popup_visible, app.whois_popup_visible, app.ban_popup_visible, app.credits_popup_visible, app.license_popup_visible, app.file_receive_popup_visible, app.file_browser_visible, app.secure_accept_popup_visible, app.highlight_popup_visible, app.away_popup_visible, app.user_list_filter_focused))
+                .and_then(|ev| handle_key(ev, app.mode, app.panel_focus, app.reply_select_mode, app.edit_select_mode, app.edit_popup_visible, app.channel_panel_visible, app.messages_panel_visible, app.user_panel_visible, app.friends_panel_visible, app.user_action_menu, app.channel_list_popup_visible, app.channel_list_scroll_mode, app.search_popup_visible, app.search_scroll_mode, app.server_list_popup_visible, app.whois_popup_visible, app.ban_popup_visible, app.credits_popup_visible, app.license_popup_visible, app.file_receive_popup_visible, app.file_browser_visible, app.secure_accept_popup_visible, app.highlight_popup_visible, app.away_popup_visible, app.user_list_filter_focused))
         } else {
             None
         };
@@ -619,6 +619,18 @@ fn apply_irc_message(
                 target.clone()
             };
             if app.is_recent_sent(&server, &effective_target, &line.text) {
+                // Backfill msgid from server echo onto our locally-displayed copy
+                if let Some(ref msgid) = line.msgid {
+                    let key = app::msg_key(&server, &effective_target);
+                    let our_nick = app.current_nickname.clone().unwrap_or_default();
+                    if let Some(buf) = app.messages.get_mut(&key) {
+                        if let Some(m) = buf.iter_mut().rev()
+                            .find(|m| m.msgid.is_none() && m.source.eq_ignore_ascii_case(&our_nick) && m.text == line.text)
+                        {
+                            m.msgid = Some(msgid.clone());
+                        }
+                    }
+                }
                 return;
             }
             if app.current_nickname.as_ref().map_or(false, |n| line.source.eq_ignore_ascii_case(n))
@@ -1187,6 +1199,124 @@ fn handle_key_action(
         }
         ReplySelectCancel => {
             app.reply_select_mode = false;
+        }
+        EditMode => {
+            let ids = app.editable_msgids();
+            if ids.is_empty() {
+                app.status_message = "No editable messages in this buffer (send a message first).".to_string();
+            } else {
+                app.edit_select_mode = true;
+                app.status_message = "Press 1–9 or 0 to pick message to edit (Esc to cancel).".to_string();
+            }
+        }
+        EditSelectByNumber(n) => {
+            let ids = app.editable_msgids();
+            let idx = if n == 10 { 9 } else { (n as usize).saturating_sub(1) };
+            if idx < ids.len() {
+                let (msgid, text) = ids[ids.len() - 1 - idx].clone();
+                // Strip trailing " (edited)" markers so user edits the clean text
+                let clean_text = text.strip_suffix(" (edited)").unwrap_or(&text).to_string();
+                app.edit_popup_msgid = msgid;
+                app.edit_popup_input = clean_text.clone();
+                app.edit_popup_cursor = clean_text.len();
+                app.edit_popup_visible = true;
+                app.edit_select_mode = false;
+                app.status_message = "Edit message (Enter to send, Esc to cancel).".to_string();
+            }
+        }
+        EditSelectCancel => {
+            app.edit_select_mode = false;
+            app.status_message = String::new();
+        }
+        EditPopupChar(c) => {
+            let cursor = app.edit_popup_cursor.min(app.edit_popup_input.len());
+            let byte_pos = app.edit_popup_input.floor_char_boundary(cursor);
+            app.edit_popup_input.insert(byte_pos, c);
+            app.edit_popup_cursor = byte_pos + c.len_utf8();
+        }
+        EditPopupBackspace => {
+            if app.edit_popup_cursor > 0 {
+                let cursor = app.edit_popup_cursor.min(app.edit_popup_input.len());
+                let byte_pos = app.edit_popup_input.floor_char_boundary(cursor);
+                if byte_pos > 0 {
+                    let prev = app.edit_popup_input.floor_char_boundary(byte_pos - 1);
+                    app.edit_popup_input.drain(prev..byte_pos);
+                    app.edit_popup_cursor = prev;
+                }
+            }
+        }
+        EditPopupDelete => {
+            let len = app.edit_popup_input.len();
+            let cursor = app.edit_popup_cursor.min(len);
+            let byte_pos = app.edit_popup_input.floor_char_boundary(cursor);
+            if byte_pos < len {
+                let next = {
+                    let s = &app.edit_popup_input[byte_pos..];
+                    byte_pos + s.char_indices().nth(1).map(|(i, _)| i).unwrap_or(s.len())
+                };
+                app.edit_popup_input.drain(byte_pos..next);
+            }
+        }
+        EditPopupCursorLeft => {
+            if app.edit_popup_cursor > 0 {
+                let cursor = app.edit_popup_cursor.min(app.edit_popup_input.len());
+                app.edit_popup_cursor = app.edit_popup_input.floor_char_boundary(cursor.saturating_sub(1));
+            }
+        }
+        EditPopupCursorRight => {
+            let len = app.edit_popup_input.len();
+            if app.edit_popup_cursor < len {
+                let cursor = app.edit_popup_cursor.min(len);
+                let byte_pos = app.edit_popup_input.floor_char_boundary(cursor);
+                let s = &app.edit_popup_input[byte_pos..];
+                let next_char_len = s.chars().next().map(|c| c.len_utf8()).unwrap_or(0);
+                app.edit_popup_cursor = (byte_pos + next_char_len).min(len);
+            }
+        }
+        EditPopupCursorHome => {
+            app.edit_popup_cursor = 0;
+        }
+        EditPopupCursorEnd => {
+            app.edit_popup_cursor = app.edit_popup_input.len();
+        }
+        EditPopupSend => {
+            let new_text = app.edit_popup_input.trim().to_string();
+            let msgid = app.edit_popup_msgid.clone();
+            app.edit_popup_visible = false;
+            app.edit_popup_msgid.clear();
+            app.edit_popup_input.clear();
+            app.edit_popup_cursor = 0;
+            app.status_message = String::new();
+            if !new_text.is_empty() && !msgid.is_empty() {
+                if let (Some(server), Some((c, _))) = (
+                    app.current_server.clone(),
+                    app.current_server.as_ref().and_then(|s| clients.get(s.as_str())),
+                ) {
+                    let target = app.current_channel.as_deref().unwrap_or("*server*").to_string();
+                    if target == "*server*" {
+                        app.status_message = "Cannot edit in server buffer.".to_string();
+                    } else if !app.acked_caps_per_server.get(&server).map_or(false, |s| s.contains("draft/message-edit")) {
+                        app.status_message = "Server does not support message editing (draft/message-edit).".to_string();
+                    } else {
+                        let tags = vec![
+                            Tag("draft/target-msgid".to_string(), Some(msgid)),
+                            Tag("draft/edit-text".to_string(), Some(new_text)),
+                        ];
+                        if let Ok(msg) = IrcProtoMessage::with_tags(Some(tags), None, "EDIT", vec![target.as_str()]) {
+                            if let Err(e) = c.send(msg) {
+                                app.status_message = format!("Edit failed: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        EditPopupClose => {
+            app.edit_popup_visible = false;
+            app.edit_popup_msgid.clear();
+            app.edit_popup_input.clear();
+            app.edit_popup_cursor = 0;
+            app.status_message = String::new();
         }
         FocusChannels => {
             if app.channel_panel_visible {

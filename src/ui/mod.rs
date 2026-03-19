@@ -188,6 +188,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.away_popup_visible {
         draw_away_popup(f, area, app);
     }
+    if app.edit_popup_visible {
+        draw_edit_popup(f, area, app);
+    }
 }
 
 pub const IMAGE_DISPLAY_HEIGHT: u16 = 20;
@@ -370,10 +373,12 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
     let mut cur_y = content_y + top_pad;
     let max_y = content_y + content_height as u16;
     let nick = app.current_nickname.as_deref().map(|s| s.to_string());
-    let reply_numbers = if app.reply_select_mode {
-        app.reply_select_numbers()
+    let (select_numbers, select_color) = if app.reply_select_mode {
+        (app.reply_select_numbers(), ratatui::style::Color::Cyan)
+    } else if app.edit_select_mode {
+        (app.edit_select_numbers(), ratatui::style::Color::Yellow)
     } else {
-        std::collections::HashMap::new()
+        (std::collections::HashMap::new(), ratatui::style::Color::Cyan)
     };
 
     for i in visible_start..visible_end {
@@ -381,11 +386,11 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
             break;
         }
         let m = &messages[i];
-        let reply_num = m.msgid.as_ref().and_then(|id| reply_numbers.get(id).copied());
+        let select_num = m.msgid.as_ref().and_then(|id| select_numbers.get(id).copied());
         let elapsed_ms = std::time::Instant::now().duration_since(app.created_at).as_millis() as u64;
         let text_h = message_wrapped_height(m, nick.as_deref(), inner.width, &app.reactions);
         let avail_text_h = text_h.min(max_y.saturating_sub(cur_y));
-        let content = format_message_line_wrapped(m, nick.as_deref(), &app.highlight_words, &app.reactions, inner.width, elapsed_ms, reply_num);
+        let content = format_message_line_wrapped(m, nick.as_deref(), &app.highlight_words, &app.reactions, inner.width, elapsed_ms, select_num, select_color);
         let text_rect = Rect { x: inner.x, y: cur_y, width: inner.width, height: avail_text_h };
         f.render_widget(
             Paragraph::new(content).wrap(Wrap { trim: true }),
@@ -434,7 +439,7 @@ fn draw_message_area(f: &mut Frame, area: Rect, app: &mut App) {
 /// Format a message line: header "nick | HH:mm" then message on following lines.
 /// Nick gets a deterministic color. Parses IRC formatting (bold, italic, etc.) for the message.
 /// Appends draft/react reactions if present.
-/// reply_num: when in reply-select mode, 1-9 or 10 (displays as "0") to show which key selects this message.
+/// select_num: when in reply/edit-select mode, 1-9 or 10 (displays as "0") to show which key selects this message.
 fn format_message_line_wrapped(
     m: &MessageLine,
     current_nick: Option<&str>,
@@ -442,9 +447,10 @@ fn format_message_line_wrapped(
     reactions: &std::collections::HashMap<String, Vec<(String, String)>>,
     width: u16,
     elapsed_ms: u64,
-    reply_num: Option<u8>,
+    select_num: Option<u8>,
+    select_color: Color,
 ) -> Text<'static> {
-    let num_prefix = reply_num.map(|n| {
+    let num_prefix = select_num.map(|n| {
         let s = match n {
             1 => " 1",
             2 => " 2",
@@ -458,7 +464,7 @@ fn format_message_line_wrapped(
             10 => " 0",
             _ => "  ",
         };
-        Span::styled(s, Style::default().fg(Color::Cyan))
+        Span::styled(s, Style::default().fg(select_color))
     }).unwrap_or_else(|| Span::raw(""));
     let time_str = m
         .timestamp
@@ -473,7 +479,7 @@ fn format_message_line_wrapped(
     let bot_prefix = if m.is_bot_sender { "[bot] " } else { "" };
     let reply_indicator = m.reply_to_msgid.as_ref().map(|_| " ↷").unwrap_or_default();
     let mut header_spans = vec![num_prefix];
-    if reply_num.is_some() {
+    if select_num.is_some() {
         header_spans.push(Span::raw(" "));
     }
     header_spans.extend(vec![
@@ -1804,4 +1810,77 @@ fn draw_file_browser_popup(f: &mut Frame, area: Rect, app: &App) {
     let hint = Paragraph::new(hint_text)
         .style(popup_style.add_modifier(Modifier::DIM));
     f.render_widget(hint, chunks[2]);
+}
+
+fn draw_edit_popup(f: &mut Frame, area: Rect, app: &App) {
+    use unicode_width::UnicodeWidthStr;
+    let popup_width = (area.width * 4 / 5).max(40).min(area.width.saturating_sub(4));
+    let popup_height = 7u16;
+    let x = area.x + (area.width.saturating_sub(popup_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(popup_height)) / 2;
+    let popup_rect = Rect { x, y, width: popup_width, height: popup_height };
+    f.render_widget(Clear, popup_rect);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Edit Message ")
+        .style(popup_overlay_style());
+    f.render_widget(block, popup_rect);
+
+    let inner_width = popup_width.saturating_sub(2) as usize;
+    let cursor = app.edit_popup_cursor.min(app.edit_popup_input.len());
+    let before = &app.edit_popup_input[..cursor];
+    let after = &app.edit_popup_input[cursor..];
+
+    // Scroll the visible window so the cursor is always visible
+    let before_w = before.width();
+    let scroll = if before_w >= inner_width {
+        before_w + 1 - inner_width
+    } else {
+        0
+    };
+
+    // Build visible before/after taking scroll into account
+    let visible_before: String = {
+        let full: String = before.chars().collect();
+        let chars: Vec<char> = full.chars().collect();
+        let mut start = 0;
+        let mut acc = 0usize;
+        for (i, c) in chars.iter().enumerate() {
+            acc += c.width().unwrap_or(1);
+            if acc > scroll {
+                start = i;
+                break;
+            }
+        }
+        chars[start..].iter().collect()
+    };
+
+    let cursor_char = after.chars().next().map(|c| c.to_string()).unwrap_or_else(|| " ".to_string());
+    let after_rest: String = after.chars().skip(1).collect();
+
+    let input_line = Line::from(vec![
+        Span::raw(visible_before),
+        Span::styled(cursor_char, Style::default().add_modifier(Modifier::REVERSED)),
+        Span::raw(after_rest),
+    ]);
+
+    let hint_line = Line::from(Span::styled(
+        "Enter: send  |  Esc: cancel  |  \u{2190}/\u{2192} Home/End: move cursor",
+        Style::default().add_modifier(Modifier::DIM),
+    ));
+
+    // Layout: 1 blank, input, 1 blank, hint
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .margin(1)
+        .split(popup_rect);
+
+    f.render_widget(Paragraph::new(input_line), chunks[1]);
+    f.render_widget(Paragraph::new(hint_line), chunks[3]);
 }
