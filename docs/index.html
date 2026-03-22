@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>rvIRC — Rust + Vim + IRC</title>
+  <meta name="description" content="A terminal IRC client with vim-style modes and commands, built in Rust with ratatui. Full IRCv3 support, encrypted DMs, inline images, and more.">
+  <style>
+    :root {
+      --bg: #0d1117;
+      --bg-card: #161b22;
+      --bg-code: #1c2128;
+      --border: #30363d;
+      --text: #c9d1d9;
+      --text-dim: #8b949e;
+      --accent: #58a6ff;
+      --green: #3fb950;
+      --yellow: #d29922;
+      --orange: #d18616;
+      --red: #f85149;
+      --purple: #bc8cff;
+      --cyan: #39d2c0;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    code, .mono {
+      font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+    }
+
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* ── NAV ── */
+    nav {
+      position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+      background: rgba(13, 17, 23, 0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      padding: 0 2rem;
+    }
+    nav .inner {
+      max-width: 1200px; margin: 0 auto;
+      display: flex; align-items: center; justify-content: space-between;
+      height: 60px;
+    }
+    nav .logo {
+      font-size: 1.25rem; font-weight: 700; color: var(--text);
+      letter-spacing: -0.02em;
+    }
+    nav .logo span { color: var(--accent); }
+    nav ul { list-style: none; display: flex; gap: 1.5rem; }
+    nav ul a { color: var(--text-dim); font-size: 0.875rem; transition: color 0.2s; }
+    nav ul a:hover { color: var(--text); text-decoration: none; }
+
+    /* ── HERO ── */
+    .hero {
+      padding: 8rem 2rem 4rem;
+      text-align: center;
+      background: radial-gradient(ellipse at 50% 0%, rgba(88,166,255,0.08) 0%, transparent 60%);
+    }
+    .hero h1 {
+      font-size: clamp(2.5rem, 5vw, 4rem);
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      margin-bottom: 1rem;
+    }
+    .hero h1 .rust { color: var(--orange); }
+    .hero h1 .vim { color: var(--green); }
+    .hero h1 .irc { color: var(--accent); }
+    .hero .tagline {
+      font-size: 1.25rem;
+      color: var(--text-dim);
+      max-width: 600px;
+      margin: 0 auto 2rem;
+    }
+    .hero .badges {
+      display: flex; gap: 0.75rem; justify-content: center; flex-wrap: wrap;
+      margin-bottom: 2.5rem;
+    }
+    .badge {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      padding: 0.3rem 0.75rem;
+      border-radius: 999px;
+      font-size: 0.8rem; font-weight: 600;
+      border: 1px solid var(--border);
+      background: var(--bg-card);
+    }
+    .badge .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+    }
+    .badge .dot.green { background: var(--green); }
+    .badge .dot.yellow { background: var(--yellow); }
+    .badge .dot.blue { background: var(--accent); }
+    .badge .dot.purple { background: var(--purple); }
+
+    .install-block {
+      display: inline-block;
+      background: var(--bg-code);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.75rem 1.5rem;
+      margin-bottom: 2.5rem;
+    }
+    .install-block code {
+      font-size: 0.95rem;
+      color: var(--green);
+    }
+    .install-block .dim { color: var(--text-dim); }
+
+    .hero-img {
+      max-width: 900px;
+      width: 100%;
+      margin: 0 auto;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      box-shadow: 0 16px 48px rgba(0,0,0,0.4);
+    }
+
+    /* ── SECTIONS ── */
+    section {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 5rem 2rem;
+    }
+    section h2 {
+      font-size: 2rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin-bottom: 0.5rem;
+    }
+    section .subtitle {
+      color: var(--text-dim);
+      margin-bottom: 2.5rem;
+      font-size: 1.05rem;
+    }
+
+    /* feature grid */
+    .features {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 1.25rem;
+    }
+    .feature-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.5rem;
+      transition: border-color 0.2s, transform 0.2s;
+    }
+    .feature-card:hover {
+      border-color: var(--accent);
+      transform: translateY(-2px);
+    }
+    .feature-card .icon {
+      font-size: 1.5rem;
+      margin-bottom: 0.75rem;
+    }
+    .feature-card h3 {
+      font-size: 1rem;
+      font-weight: 600;
+      margin-bottom: 0.4rem;
+    }
+    .feature-card p {
+      font-size: 0.875rem;
+      color: var(--text-dim);
+      line-height: 1.5;
+    }
+
+    /* cap tables */
+    .cap-section { margin-bottom: 3rem; }
+    .cap-section h3 {
+      font-size: 1.15rem;
+      font-weight: 600;
+      margin-bottom: 1rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .cap-section h3 .count {
+      color: var(--text-dim);
+      font-weight: 400;
+      font-size: 0.875rem;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.875rem;
+    }
+    thead th {
+      text-align: left;
+      padding: 0.6rem 1rem;
+      color: var(--text-dim);
+      font-weight: 600;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    tbody td {
+      padding: 0.6rem 1rem;
+      border-bottom: 1px solid rgba(48,54,61,0.5);
+      vertical-align: top;
+    }
+    tbody tr:hover { background: rgba(88,166,255,0.04); }
+    td code {
+      background: var(--bg-code);
+      padding: 0.15rem 0.4rem;
+      border-radius: 4px;
+      font-size: 0.8rem;
+      color: var(--cyan);
+    }
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--bg-card);
+    }
+    .table-wrap table { margin: 0; }
+
+    /* command groups */
+    .cmd-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+      gap: 1.25rem;
+    }
+    .cmd-group {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.5rem;
+    }
+    .cmd-group h3 {
+      font-size: 0.95rem;
+      font-weight: 600;
+      margin-bottom: 1rem;
+      color: var(--accent);
+    }
+    .cmd-row {
+      display: flex;
+      gap: 1rem;
+      padding: 0.35rem 0;
+      font-size: 0.85rem;
+    }
+    .cmd-row .cmd {
+      flex-shrink: 0;
+      min-width: 160px;
+      color: var(--cyan);
+      font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+    }
+    .cmd-row .desc { color: var(--text-dim); }
+
+    /* keybindings */
+    .key-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 1.25rem;
+    }
+    .key-group {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.5rem;
+    }
+    .key-group h3 {
+      font-size: 0.95rem;
+      font-weight: 600;
+      margin-bottom: 1rem;
+      color: var(--green);
+    }
+    .key-row {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      padding: 0.3rem 0;
+      font-size: 0.85rem;
+    }
+    .key-row kbd {
+      display: inline-block;
+      min-width: 28px;
+      text-align: center;
+      padding: 0.2rem 0.5rem;
+      background: var(--bg-code);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+      font-size: 0.8rem;
+      color: var(--yellow);
+    }
+    .key-row .desc { color: var(--text-dim); }
+
+    /* config section */
+    .config-block {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .config-block .header {
+      padding: 0.75rem 1rem;
+      background: var(--bg-code);
+      border-bottom: 1px solid var(--border);
+      font-size: 0.8rem;
+      color: var(--text-dim);
+      font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
+    }
+    .config-block pre {
+      padding: 1.25rem;
+      overflow-x: auto;
+      font-size: 0.85rem;
+      line-height: 1.6;
+    }
+    .config-block pre code { color: var(--text); background: none; padding: 0; }
+    .config-block pre .comment { color: var(--text-dim); }
+    .config-block pre .key { color: var(--cyan); }
+    .config-block pre .val { color: var(--green); }
+    .config-block pre .str { color: var(--yellow); }
+
+    /* security */
+    .security-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1.25rem;
+    }
+    .security-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.5rem;
+    }
+    .security-card h3 {
+      font-size: 0.95rem;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+      color: var(--purple);
+    }
+    .security-card p {
+      font-size: 0.85rem;
+      color: var(--text-dim);
+      line-height: 1.5;
+    }
+
+    /* footer */
+    footer {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 3rem 2rem;
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      color: var(--text-dim);
+      font-size: 0.85rem;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+    footer a { color: var(--text-dim); }
+    footer a:hover { color: var(--text); }
+
+    /* responsive */
+    @media (max-width: 768px) {
+      nav ul { display: none; }
+      .hero { padding: 6rem 1rem 3rem; }
+      section { padding: 3rem 1rem; }
+      .cmd-row .cmd { min-width: 120px; }
+    }
+  </style>
+</head>
+<body>
+
+<nav>
+  <div class="inner">
+    <div class="logo">rv<span>IRC</span></div>
+    <ul>
+      <li><a href="#features">Features</a></li>
+      <li><a href="#capabilities">IRCv3 Caps</a></li>
+      <li><a href="#commands">Commands</a></li>
+      <li><a href="#keybindings">Keybindings</a></li>
+      <li><a href="#config">Config</a></li>
+      <li><a href="#security">Security</a></li>
+      <li><a href="https://github.com/KaraZajac/rvIRC">GitHub</a></li>
+    </ul>
+  </div>
+</nav>
+
+<!-- ── HERO ── -->
+<div class="hero">
+  <h1><span class="rust">Rust</span> + <span class="vim">Vim</span> + <span class="irc">IRC</span></h1>
+  <p class="tagline">A terminal IRC client with vim-style modes, full IRCv3 support, encrypted DMs, inline images, and more.</p>
+
+  <div class="badges">
+    <span class="badge"><span class="dot green"></span>IRCv3 Compliant</span>
+    <span class="badge"><span class="dot blue"></span>Vim Modes</span>
+    <span class="badge"><span class="dot purple"></span>E2E Encrypted DMs</span>
+    <span class="badge"><span class="dot yellow"></span>Multi-Server</span>
+  </div>
+
+  <div class="install-block">
+    <code><span class="dim">$</span> cargo build --release <span class="dim">&&</span> ./target/release/rvirc</code>
+  </div>
+
+  <br>
+  <img class="hero-img" src="../images/rvirc.png" alt="rvIRC screenshot">
+</div>
+
+<!-- ── FEATURES ── -->
+<section id="features">
+  <h2>Features</h2>
+  <p class="subtitle">Everything you need in a modern terminal IRC client.</p>
+
+  <div class="features">
+    <div class="feature-card">
+      <div class="icon">⌨️</div>
+      <h3>Vim-Style Modes</h3>
+      <p>NORMAL, INSERT, and COMMAND modes with distinct status bar colors. Navigate like you would in Vim — <code>i</code> to type, <code>:</code> for commands, <code>Esc</code> to return.</p>
+    </div>
+    <div class="feature-card">
+      <div class="icon">🌐</div>
+      <h3>Multi-Server</h3>
+      <p>Connect to multiple IRC servers simultaneously. The channels pane groups everything by server. Switch between servers and channels seamlessly.</p>
+    </div>
+    <div class="feature-card">
+      <div class="icon">🔒</div>
+      <h3>Encrypted DMs</h3>
+      <p>End-to-end encrypted direct messages using X25519 key exchange and ChaCha20-Poly1305 encryption. TOFU key pinning and SAS verification built in.</p>
+    </div>
+    <div class="feature-card">
+      <div class="icon">📁</div>
+      <h3>File Transfer</h3>
+      <p>Send and receive files via magic-wormhole relay. Accept/reject popups, in-chat progress, and built-in file browser. Works inside encrypted DM sessions.</p>
+    </div>
+    <div class="feature-card">
+      <div class="icon">🖼️</div>
+      <h3>Inline Images</h3>
+      <p>Image URLs render inline in chat via Sixel, Kitty, or iTerm2 protocols. Animated GIF support included. Works inside encrypted DMs too.</p>
+    </div>
+    <div class="feature-card">
+      <div class="icon">🔔</div>
+      <h3>Notifications</h3>
+      <p>Desktop notifications and optional sound for unviewed buffers. Highlight words trigger mention-style alerts. <code>:mute</code> / <code>:unmute</code> to control.</p>
+    </div>
+    <div class="feature-card">
+      <div class="icon">👥</div>
+      <h3>Friends List</h3>
+      <p>Track nicks with MONITOR. Green = online, yellow = away, red = offline. Presence updates in real time via away-notify and extended-monitor.</p>
+    </div>
+    <div class="feature-card">
+      <div class="icon">🔄</div>
+      <h3>Auto-Reconnect</h3>
+      <p>After unexpected disconnect, retries up to 3 times with exponential backoff (5s, 15s, 30s). Manual <code>:connect</code> or <code>:quit</code> cancels.</p>
+    </div>
+    <div class="feature-card">
+      <div class="icon">🎨</div>
+      <h3>IRC Formatting & Effects</h3>
+      <p>Bold, italic, strikethrough, colors, spoilers — all rendered. Plus rvIRC-exclusive <code>@@rainbow@@</code> and <code>$$scared$$</code> text effects.</p>
+    </div>
+    <div class="feature-card">
+      <div class="icon">🔍</div>
+      <h3>Search & Superlist</h3>
+      <p><code>:search</code> opens a filterable popup over the current buffer. <code>:superlist</code> fetches channel lists from all servers in one combined view.</p>
+    </div>
+    <div class="feature-card">
+      <div class="icon">✏️</div>
+      <h3>Message Editing</h3>
+      <p>Press <code>e</code> to enter edit-select mode — your recent messages are numbered in yellow. Pick one to open an edit popup, modify, and send.</p>
+    </div>
+    <div class="feature-card">
+      <div class="icon">↩️</div>
+      <h3>Threaded Replies & Reactions</h3>
+      <p>Press <code>r</code> to reply to a message. React with emoji via <code>:react</code>. Reactions display inline below the target message.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ── IRCv3 CAPABILITIES ── -->
+<section id="capabilities">
+  <h2>IRCv3 Capabilities</h2>
+  <p class="subtitle">Full coverage of the IRCv3 specification — stable, draft, and client tags.</p>
+
+  <div class="cap-section">
+    <h3>Stable Capabilities <span class="count">— 17 caps</span></h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Capability</th><th>What rvIRC Does</th></tr></thead>
+        <tbody>
+          <tr><td><code>sasl</code></td><td>SASL PLAIN and EXTERNAL authentication</td></tr>
+          <tr><td><code>multi-prefix</code></td><td>Shows all mode prefixes per nick (e.g. <code>@+nick</code>)</td></tr>
+          <tr><td><code>away-notify</code></td><td>Friends pane updates in real time as nicks go away/return</td></tr>
+          <tr><td><code>account-notify</code></td><td>Tracks nick→account mapping changes</td></tr>
+          <tr><td><code>account-tag</code></td><td>Shows account name alongside messages</td></tr>
+          <tr><td><code>extended-join</code></td><td>Account name and real name on JOIN</td></tr>
+          <tr><td><code>invite-notify</code></td><td>Notifies when someone else is invited to your channel</td></tr>
+          <tr><td><code>chghost</code></td><td>Updates ident@host cache on host changes</td></tr>
+          <tr><td><code>cap-notify</code></td><td>Handles dynamic CAP NEW/DEL</td></tr>
+          <tr><td><code>userhost-in-names</code></td><td>Stores full user@host from NAMES reply</td></tr>
+          <tr><td><code>server-time</code></td><td>Displays server-provided timestamps on all messages</td></tr>
+          <tr><td><code>message-tags</code></td><td>Full tag support: typing, reactions, replies, bot flags</td></tr>
+          <tr><td><code>batch</code></td><td>Chathistory batches; netsplit/netjoin collapsed to one line</td></tr>
+          <tr><td><code>echo-message</code></td><td>Server echoes sent messages for correct msgids</td></tr>
+          <tr><td><code>labeled-response</code></td><td>Tags requests to correlate responses</td></tr>
+          <tr><td><code>standard-replies</code></td><td>Color-coded FAIL / WARN / NOTE labels</td></tr>
+          <tr><td><code>setname</code></td><td>Change your real name; display others' changes</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="cap-section">
+    <h3>Working Group / Draft Capabilities <span class="count">— 13 caps</span></h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Capability</th><th>What rvIRC Does</th></tr></thead>
+        <tbody>
+          <tr><td><code>monitor</code></td><td>Base presence monitoring for the friends list</td></tr>
+          <tr><td><code>extended-monitor</code></td><td>Extended MONITOR for friend presence tracking</td></tr>
+          <tr><td><code>draft/chathistory</code></td><td>Fetches last N messages on join; <code>:more</code> / <code>:history</code> for older</td></tr>
+          <tr><td><code>draft/read-marker</code></td><td>Sends MARKREAD on buffer switch; syncs across clients</td></tr>
+          <tr><td><code>draft/multiline</code></td><td>Multi-line pastes sent as a single batch</td></tr>
+          <tr><td><code>draft/pre-away</code></td><td>AWAY sent before CAP END on reconnect</td></tr>
+          <tr><td><code>draft/no-implicit-names</code></td><td>Suppresses automatic NAMES on JOIN</td></tr>
+          <tr><td><code>draft/channel-rename</code></td><td>RENAME moves channel in all panes, preserves history</td></tr>
+          <tr><td><code>draft/message-redaction</code></td><td>Redact messages; shows <code>[Message redacted]</code></td></tr>
+          <tr><td><code>draft/message-edit</code></td><td>Edit messages via EDIT command with <code>(edited)</code> marker</td></tr>
+          <tr><td><code>draft/message-delete</code></td><td>Delete messages; shows <code>[Message deleted]</code></td></tr>
+          <tr><td><code>draft/account-registration</code></td><td>Register accounts with <code>:register</code></td></tr>
+          <tr><td><code>draft/extended-isupport</code></td><td>Early ISUPPORT; parses NETWORK and NETWORKICON</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="cap-section">
+    <h3>Client Tags <span class="count">— no cap negotiation required</span></h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Tag / Spec</th><th>What rvIRC Does</th></tr></thead>
+        <tbody>
+          <tr><td><code>+reply</code></td><td>Threaded replies — <kbd>r</kbd> shows numbers on last 10 messages</td></tr>
+          <tr><td><code>+draft/react</code></td><td>Emoji reactions displayed inline below messages</td></tr>
+          <tr><td><code>+draft/channel-context</code></td><td>Bot DMs with channel context appear in the channel buffer</td></tr>
+          <tr><td><code>+typing</code></td><td>Sends and displays typing indicators</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="cap-section">
+    <h3>ISUPPORT Tokens</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Token</th><th>What rvIRC Does</th></tr></thead>
+        <tbody>
+          <tr><td><code>UTF8ONLY</code></td><td>Shows notice when server enforces UTF-8</td></tr>
+          <tr><td><code>NETWORK</code></td><td>Network name displayed on connect</td></tr>
+          <tr><td><code>NETWORKICON</code></td><td>Network icon URL shown on connect</td></tr>
+          <tr><td><code>WHOX</code></td><td>Extended WHO fetches account names</td></tr>
+          <tr><td><code>STS</code></td><td>Persists TLS upgrade policies</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ── COMMANDS ── -->
+<section id="commands">
+  <h2>Commands</h2>
+  <p class="subtitle">Type <code>:</code> to enter COMMAND mode. Tab-completion works on command names.</p>
+
+  <div class="cmd-grid">
+    <div class="cmd-group">
+      <h3>Connection</h3>
+      <div class="cmd-row"><span class="cmd">:connect &lt;name&gt;</span><span class="desc">Connect to a server by config name</span></div>
+      <div class="cmd-row"><span class="cmd">:servers</span><span class="desc">Show server list; pick one to connect</span></div>
+      <div class="cmd-row"><span class="cmd">:reconnect</span><span class="desc">Reconnect to current server</span></div>
+      <div class="cmd-row"><span class="cmd">:disconnect</span><span class="desc">Disconnect from current server</span></div>
+      <div class="cmd-row"><span class="cmd">:quit [msg]</span><span class="desc">Disconnect all and quit</span></div>
+    </div>
+
+    <div class="cmd-group">
+      <h3>Channels &amp; Messaging</h3>
+      <div class="cmd-row"><span class="cmd">:join #channel</span><span class="desc">Join a channel</span></div>
+      <div class="cmd-row"><span class="cmd">:part</span><span class="desc">Part current channel or close DM</span></div>
+      <div class="cmd-row"><span class="cmd">:list</span><span class="desc">Fetch channel list (filterable)</span></div>
+      <div class="cmd-row"><span class="cmd">:superlist</span><span class="desc">Channel list from all servers</span></div>
+      <div class="cmd-row"><span class="cmd">:msg &lt;nick&gt; &lt;text&gt;</span><span class="desc">Send a private message</span></div>
+      <div class="cmd-row"><span class="cmd">:me &lt;action&gt;</span><span class="desc">Send a CTCP ACTION</span></div>
+      <div class="cmd-row"><span class="cmd">:topic [text]</span><span class="desc">Show or set channel topic</span></div>
+      <div class="cmd-row"><span class="cmd">:invite &lt;nick&gt;</span><span class="desc">Invite nick to channel</span></div>
+      <div class="cmd-row"><span class="cmd">:channel #chan</span><span class="desc">Switch to a channel/DM</span></div>
+      <div class="cmd-row"><span class="cmd">:clear</span><span class="desc">Clear current buffer</span></div>
+    </div>
+
+    <div class="cmd-group">
+      <h3>Users</h3>
+      <div class="cmd-row"><span class="cmd">:nick &lt;name&gt;</span><span class="desc">Change your nickname</span></div>
+      <div class="cmd-row"><span class="cmd">:away [msg]</span><span class="desc">Set or clear away status</span></div>
+      <div class="cmd-row"><span class="cmd">:whois [nick]</span><span class="desc">Show whois popup</span></div>
+      <div class="cmd-row"><span class="cmd">:kick &lt;nick&gt;</span><span class="desc">Kick user from channel</span></div>
+      <div class="cmd-row"><span class="cmd">:ban &lt;mask&gt;</span><span class="desc">Set a ban mask</span></div>
+      <div class="cmd-row"><span class="cmd">:ignore &lt;nick&gt;</span><span class="desc">Locally hide all messages from nick</span></div>
+      <div class="cmd-row"><span class="cmd">:add-friend &lt;nick&gt;</span><span class="desc">Add to friends list (MONITOR)</span></div>
+    </div>
+
+    <div class="cmd-group">
+      <h3>Account</h3>
+      <div class="cmd-row"><span class="cmd">:pass &lt;pw&gt;</span><span class="desc">Identify with NickServ</span></div>
+      <div class="cmd-row"><span class="cmd">:register &lt;email&gt; &lt;pw&gt;</span><span class="desc">Register a new account</span></div>
+      <div class="cmd-row"><span class="cmd">:setname &lt;name&gt;</span><span class="desc">Change your IRC real name</span></div>
+    </div>
+
+    <div class="cmd-group">
+      <h3>Message Actions</h3>
+      <div class="cmd-row"><span class="cmd">:reply</span><span class="desc">Enter reply-select mode</span></div>
+      <div class="cmd-row"><span class="cmd">:react &lt;emoji&gt;</span><span class="desc">React to selected message</span></div>
+      <div class="cmd-row"><span class="cmd">:edit &lt;text&gt;</span><span class="desc">Edit your last message</span></div>
+      <div class="cmd-row"><span class="cmd">:delete [msgid]</span><span class="desc">Delete a message</span></div>
+      <div class="cmd-row"><span class="cmd">:redact [msgid]</span><span class="desc">Redact a message</span></div>
+      <div class="cmd-row"><span class="cmd">:search</span><span class="desc">Search current buffer</span></div>
+      <div class="cmd-row"><span class="cmd">:more</span><span class="desc">Fetch older messages</span></div>
+    </div>
+
+    <div class="cmd-group">
+      <h3>Encrypted DMs &amp; Files</h3>
+      <div class="cmd-row"><span class="cmd">:secure [nick]</span><span class="desc">Start encrypted DM session</span></div>
+      <div class="cmd-row"><span class="cmd">:unsecure [nick]</span><span class="desc">End encrypted session</span></div>
+      <div class="cmd-row"><span class="cmd">:verify [nick]</span><span class="desc">Show SAS verification code</span></div>
+      <div class="cmd-row"><span class="cmd">:verified [nick]</span><span class="desc">Mark peer as verified</span></div>
+      <div class="cmd-row"><span class="cmd">:sendfile [nick] [path]</span><span class="desc">Send file via wormhole</span></div>
+    </div>
+
+    <div class="cmd-group">
+      <h3>Metadata</h3>
+      <div class="cmd-row"><span class="cmd">:metadata list</span><span class="desc">List your metadata keys</span></div>
+      <div class="cmd-row"><span class="cmd">:metadata get &lt;key&gt;</span><span class="desc">Get a metadata value</span></div>
+      <div class="cmd-row"><span class="cmd">:metadata set &lt;k&gt; &lt;v&gt;</span><span class="desc">Set a metadata key/value</span></div>
+      <div class="cmd-row"><span class="cmd">:metadata clear [key]</span><span class="desc">Clear metadata</span></div>
+    </div>
+
+    <div class="cmd-group">
+      <h3>UI &amp; Other</h3>
+      <div class="cmd-row"><span class="cmd">:channel-panel show|hide</span><span class="desc">Toggle channels pane</span></div>
+      <div class="cmd-row"><span class="cmd">:highlight</span><span class="desc">Manage highlight words</span></div>
+      <div class="cmd-row"><span class="cmd">:notifications on|off</span><span class="desc">Toggle notifications</span></div>
+      <div class="cmd-row"><span class="cmd">:caps</span><span class="desc">Show negotiated IRCv3 caps</span></div>
+      <div class="cmd-row"><span class="cmd">:raw &lt;cmd&gt;</span><span class="desc">Send raw IRC command</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ── KEYBINDINGS ── -->
+<section id="keybindings">
+  <h2>Keybindings</h2>
+  <p class="subtitle">Vim-style modes with familiar navigation.</p>
+
+  <div class="key-grid">
+    <div class="key-group">
+      <h3>NORMAL Mode</h3>
+      <div class="key-row"><kbd>i</kbd><span class="desc">Enter INSERT mode</span></div>
+      <div class="key-row"><kbd>:</kbd><span class="desc">Enter COMMAND mode</span></div>
+      <div class="key-row"><kbd>r</kbd><span class="desc">Reply-select mode (cyan numbers)</span></div>
+      <div class="key-row"><kbd>e</kbd><span class="desc">Edit-select mode (yellow numbers)</span></div>
+      <div class="key-row"><kbd>c</kbd><span class="desc">Focus channels pane</span></div>
+      <div class="key-row"><kbd>m</kbd><span class="desc">Focus messages pane</span></div>
+      <div class="key-row"><kbd>u</kbd><span class="desc">Focus users pane</span></div>
+      <div class="key-row"><kbd>f</kbd><span class="desc">Focus friends pane</span></div>
+      <div class="key-row"><kbd>k</kbd> / <kbd>j</kbd><span class="desc">Scroll up / down</span></div>
+      <div class="key-row"><kbd>PgUp</kbd> / <kbd>PgDn</kbd><span class="desc">Scroll by page</span></div>
+      <div class="key-row"><kbd>Esc</kbd><span class="desc">Return focus to main</span></div>
+    </div>
+
+    <div class="key-group">
+      <h3>INSERT / COMMAND Mode</h3>
+      <div class="key-row"><kbd>Enter</kbd><span class="desc">Send message / execute command</span></div>
+      <div class="key-row"><kbd>Esc</kbd><span class="desc">Return to NORMAL mode</span></div>
+      <div class="key-row"><kbd>↑</kbd> / <kbd>↓</kbd><span class="desc">Browse input history</span></div>
+      <div class="key-row"><kbd>Tab</kbd><span class="desc">Tab-complete commands</span></div>
+      <div class="key-row"><kbd>Ctrl+A</kbd><span class="desc">Cursor to start</span></div>
+      <div class="key-row"><kbd>Ctrl+E</kbd><span class="desc">Cursor to end</span></div>
+      <div class="key-row"><kbd>Ctrl+W</kbd><span class="desc">Delete word left</span></div>
+      <div class="key-row"><kbd>Ctrl+U</kbd><span class="desc">Delete to start of line</span></div>
+      <div class="key-row"><kbd>Ctrl+K</kbd><span class="desc">Delete to end of line</span></div>
+    </div>
+
+    <div class="key-group">
+      <h3>Pane Navigation</h3>
+      <div class="key-row"><kbd>k</kbd> / <kbd>j</kbd><span class="desc">Move selection up / down</span></div>
+      <div class="key-row"><kbd>Enter</kbd><span class="desc">Switch to selected item</span></div>
+      <div class="key-row"><kbd>Esc</kbd><span class="desc">Unfocus pane</span></div>
+    </div>
+
+    <div class="key-group">
+      <h3>Edit Popup</h3>
+      <div class="key-row"><kbd>Enter</kbd><span class="desc">Send edited message</span></div>
+      <div class="key-row"><kbd>Esc</kbd><span class="desc">Cancel edit</span></div>
+      <div class="key-row"><kbd>←</kbd> / <kbd>→</kbd><span class="desc">Move cursor</span></div>
+      <div class="key-row"><kbd>Home</kbd> / <kbd>End</kbd><span class="desc">Jump to start / end</span></div>
+      <div class="key-row"><kbd>Backspace</kbd><span class="desc">Delete character left</span></div>
+      <div class="key-row"><kbd>Delete</kbd><span class="desc">Delete character right</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ── CONFIG ── -->
+<section id="config">
+  <h2>Configuration</h2>
+  <p class="subtitle">All config lives in <code>~/.config/rvIRC/</code>.</p>
+
+  <div style="margin-bottom: 2rem;">
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>File</th><th>Contents</th></tr></thead>
+        <tbody>
+          <tr><td><code>config.toml</code></td><td>Main config — servers, nickname, preferences</td></tr>
+          <tr><td><code>identity.toml</code></td><td>Persistent X25519 identity keypair (auto-generated)</td></tr>
+          <tr><td><code>known_keys.toml</code></td><td>TOFU key store — peer identity keys, verification status</td></tr>
+          <tr><td><code>friends.toml</code></td><td>Friends list (nicks to MONITOR)</td></tr>
+          <tr><td><code>highlight.toml</code></td><td>Highlight word list</td></tr>
+          <tr><td><code>read_markers.toml</code></td><td>Per-buffer read position</td></tr>
+          <tr><td><code>sts.toml</code></td><td>Persisted STS upgrade policies</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="config-block">
+    <div class="header">~/.config/rvIRC/config.toml</div>
+    <pre><code><span class="key">username</span> = <span class="str">"myuser"</span>
+<span class="key">nickname</span> = <span class="str">"mynick"</span>
+<span class="key">real_name</span> = <span class="str">"My Name"</span>
+<span class="comment"># alt_nick = "mynick_"            # fallback nick if primary is in use</span>
+<span class="comment"># download_dir = "~/Downloads/"   # default save directory for files</span>
+<span class="comment"># render_images = true            # inline image display (default: true)</span>
+<span class="comment"># offline_friends = "show"        # "show" or "hide" offline friends</span>
+<span class="comment"># notifications = true            # desktop notifications (default: true)</span>
+<span class="comment"># sounds = true                   # terminal bell (default: true)</span>
+
+<span class="key">[[servers]]</span>
+<span class="key">name</span> = <span class="str">"Libera"</span>
+<span class="key">host</span> = <span class="str">"irc.libera.chat"</span>
+<span class="key">port</span> = <span class="val">6697</span>
+<span class="key">tls</span> = <span class="val">true</span>
+<span class="comment"># identify_password = "your_password"   # NickServ or SASL password</span>
+<span class="comment"># sasl_mechanism = "plain"              # "plain" or "external"</span>
+<span class="comment"># auto_connect = "yes"                  # connect on startup</span>
+<span class="comment"># auto_join = "#rvirc, #rust"           # join after identify</span>
+<span class="comment"># proxy_url = "socks5://127.0.0.1:1080" # SOCKS5 proxy</span>
+
+<span class="key">[[servers]]</span>
+<span class="key">name</span> = <span class="str">"Hackint"</span>
+<span class="key">host</span> = <span class="str">"irc.hackint.org"</span>
+<span class="key">port</span> = <span class="val">6697</span>
+<span class="key">tls</span> = <span class="val">true</span></code></pre>
+  </div>
+</section>
+
+<!-- ── SECURITY ── -->
+<section id="security">
+  <h2>Encrypted DMs</h2>
+  <p class="subtitle">End-to-end encryption that works transparently over standard IRC.</p>
+
+  <div class="security-grid">
+    <div class="security-card">
+      <h3>Key Exchange</h3>
+      <p>Fresh ephemeral X25519 keypairs generated per session. DH shared secret expanded via HKDF-SHA256 into directional keys (<code>rvIRC-dm-init</code> / <code>rvIRC-dm-resp</code>).</p>
+    </div>
+    <div class="security-card">
+      <h3>Encryption</h3>
+      <p>ChaCha20-Poly1305 AEAD cipher with directional keys. Each side uses a different key to prevent (key, nonce) reuse. Monotonically increasing nonces for replay protection.</p>
+    </div>
+    <div class="security-card">
+      <h3>TOFU</h3>
+      <p>Peer identity keys stored in <code>known_keys.toml</code> with fingerprint, verification status, and timestamps. Key changes trigger a red warning and block the handshake.</p>
+    </div>
+    <div class="security-card">
+      <h3>SAS Verification</h3>
+      <p>6-word Short Authenticated String derived from DH secret + both identity keys. Compare out-of-band with your peer, then <code>:verified</code> to mark as trusted.</p>
+    </div>
+    <div class="security-card">
+      <h3>Persistent Identity</h3>
+      <p>X25519 keypair in <code>identity.toml</code> (0600 permissions). Used for TOFU and SAS — not for DH exchange, so forward secrecy is preserved.</p>
+    </div>
+    <div class="security-card">
+      <h3>Workflow</h3>
+      <p><code>:secure</code> → accept popup → key exchange → encrypted chat (🔒 in channel list) → <code>:verify</code> → compare codes → <code>:verified</code> (✔ marker).</p>
+    </div>
+  </div>
+</section>
+
+<!-- ── FOOTER ── -->
+<footer>
+  <span>rvIRC — Rust + Vim + IRC</span>
+  <span>
+    <a href="https://github.com/KaraZajac/rvIRC">Source</a> ·
+    <a href="https://github.com/KaraZajac/rvIRC/issues">Issues</a> ·
+    <a href="https://github.com/KaraZajac/rIRCd">rIRCd</a>
+  </span>
+</footer>
+
+</body>
+</html>
